@@ -1,0 +1,11 @@
+{
+  "name": "cgraph-native",
+  "version-string": "0.1.0",
+  "builtin-baseline": "6bbea753e7f56a86b1d7bfe548810d6beafb4c81",
+  "dependencies": [
+    "curl",
+    "igraph",
+    "nlohmann-json",
+    "utf8proc"
+  ]
+}

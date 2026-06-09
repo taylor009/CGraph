@@ -1,0 +1,78 @@
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace cgraph {
+
+using Properties = std::unordered_map<std::string, std::string>;
+
+enum class Confidence {
+  Extracted,
+  Inferred,
+  Ambiguous,
+};
+
+enum class BuildState {
+  Empty,
+  DeterministicReady,
+  Enriching,
+  Idle,
+  Failed,
+};
+
+struct SourceLocation {
+  std::uint32_t start_line = 0;
+  std::uint32_t start_column = 0;
+  std::uint32_t end_line = 0;
+  std::uint32_t end_column = 0;
+};
+
+struct Node {
+  std::string id;
+  std::string label;
+  std::string source_file;
+  std::optional<SourceLocation> source_location;
+  std::string kind;
+  Confidence confidence = Confidence::Extracted;
+  std::optional<double> confidence_score;
+  Properties properties;
+};
+
+struct Edge {
+  std::string source;
+  std::string target;
+  std::string relation;
+  Confidence confidence = Confidence::Extracted;
+  std::optional<double> confidence_score;
+  Properties properties;
+};
+
+struct Hyperedge {
+  std::string id;
+  std::vector<std::string> nodes;
+  std::string relation;
+  Confidence confidence = Confidence::Extracted;
+  std::optional<double> confidence_score;
+  Properties properties;
+};
+
+struct Fragment {
+  std::vector<Node> nodes;
+  std::vector<Edge> edges;
+  std::vector<Hyperedge> hyperedges;
+  std::vector<std::string> warnings;
+};
+
+struct GraphSnapshot {
+  std::vector<Node> nodes;
+  std::vector<Edge> edges;
+  std::vector<Hyperedge> hyperedges;
+  BuildState build_state = BuildState::Empty;
+  double cache_hit_rate = 0.0;
+};
+
+}  // namespace cgraph

@@ -1,0 +1,15 @@
+# Build output (CMake presets write here; vcpkg_installed lives under it)
+/build/
+
+# Vendored vcpkg toolchain — bootstrapped locally, never committed or scanned
+/.vcpkg/
+vcpkg_installed/
+
+# Generated graph exports
+/graphify-out/
+*-source-graph/
+
+# Editor / OS cruft
+.DS_Store
+compile_commands.json
+.cache/

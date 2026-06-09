@@ -1,0 +1,144 @@
+#include "cgraph/semantic_chunk_plan.hpp"
+
+#include "cgraph/file_cache.hpp"
+#include "cgraph/file_watcher.hpp"
+
+#include <algorithm>
+#include <string_view>
+#include <unordered_set>
+
+namespace cgraph {
+namespace {
+
+[[nodiscard]] bool is_skipped_directory(std::string_view name) {
+  static const std::unordered_set<std::string_view> skipped = {
+      ".git",
+      ".hg",
+      ".svn",
+      ".cache",
+      ".idea",
+      ".vscode",
+      "build",
+      "cmake-build-debug",
+      "cmake-build-release",
+      "dist",
+      "node_modules",
+      "target",
+      "vendor",
+      "graphify-out",
+  };
+  return skipped.contains(name);
+}
+
+[[nodiscard]] std::vector<std::filesystem::path> collect_semantic_paths(const std::filesystem::path& root) {
+  std::vector<std::filesystem::path> paths;
+  std::error_code error;
+  std::filesystem::recursive_directory_iterator iterator(
+      root,
+      std::filesystem::directory_options::skip_permission_denied,
+      error);
+  const std::filesystem::recursive_directory_iterator end;
+
+  for (; !error && iterator != end; iterator.increment(error)) {
+    const auto& entry = *iterator;
+    const auto name = entry.path().filename().generic_string();
+    if (entry.is_directory(error)) {
+      if (is_skipped_directory(name)) {
+        iterator.disable_recursion_pending();
+      }
+      continue;
+    }
+    if (!entry.is_regular_file(error) || !is_watchable_file(entry.path())) {
+      continue;
+    }
+    if (classify_watched_file(entry.path()) == WatchedFileKind::Code) {
+      continue;
+    }
+    paths.push_back(entry.path());
+  }
+
+  std::ranges::sort(paths, [](const std::filesystem::path& lhs, const std::filesystem::path& rhs) {
+    return lhs.generic_string() < rhs.generic_string();
+  });
+  return paths;
+}
+
+[[nodiscard]] SemanticInputKind semantic_kind_for(const std::filesystem::path& path) {
+  return classify_watched_file(path) == WatchedFileKind::Media ? SemanticInputKind::Media : SemanticInputKind::Document;
+}
+
+[[nodiscard]] bool is_valid_cached_record(const SemanticCacheRecord& record) {
+  return record.state == SemanticCacheState::Valid && std::filesystem::exists(record.fragment_path);
+}
+
+[[nodiscard]] bool has_stale_record_for_source(
+    const SemanticCache& cache,
+    const std::filesystem::path& path,
+    std::string_view current_hash) {
+  for (const auto& record : cache.records()) {
+    if (record.source_path == path && record.content_hash != current_hash) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void flush_chunk(SemanticChunkPlan& plan, SemanticChunk& chunk, std::uintmax_t& chunk_bytes) {
+  if (chunk.inputs.empty()) {
+    return;
+  }
+  chunk.index = plan.chunks.size();
+  plan.chunks.push_back(std::move(chunk));
+  chunk = SemanticChunk{};
+  chunk_bytes = 0;
+}
+
+}  // namespace
+
+SemanticChunkPlan plan_semantic_chunks(
+    const std::filesystem::path& root,
+    const SemanticCache& cache,
+    SemanticChunkPlanOptions options) {
+  SemanticChunkPlan plan;
+  SemanticChunk current_chunk;
+  std::uintmax_t current_bytes = 0;
+
+  for (const auto& path : collect_semantic_paths(root)) {
+    const auto hash = sha256_file_hex(path);
+    const auto cached = cache.find_by_content_hash(hash);
+    if (cached.has_value() && is_valid_cached_record(*cached)) {
+      ++plan.cache_hits;
+      continue;
+    }
+    if (cached.has_value() || has_stale_record_for_source(cache, path, hash)) {
+      ++plan.stale_inputs;
+    }
+
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    const auto input = SemanticInput{
+        .path = path,
+        .kind = semantic_kind_for(path),
+        .content_hash = hash,
+        .size = error ? 0 : size,
+    };
+    error.clear();
+
+    const auto would_exceed_file_count =
+        options.max_files_per_chunk > 0 && current_chunk.inputs.size() >= options.max_files_per_chunk;
+    const auto would_exceed_bytes =
+        options.max_bytes_per_chunk > 0 && !current_chunk.inputs.empty() &&
+        current_bytes + input.size > options.max_bytes_per_chunk;
+    if (would_exceed_file_count || would_exceed_bytes) {
+      flush_chunk(plan, current_chunk, current_bytes);
+    }
+
+    current_bytes += input.size;
+    current_chunk.inputs.push_back(input);
+  }
+
+  flush_chunk(plan, current_chunk, current_bytes);
+  return plan;
+}
+
+}  // namespace cgraph

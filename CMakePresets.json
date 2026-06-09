@@ -1,0 +1,70 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+      }
+    },
+    {
+      "name": "sanitizers",
+      "displayName": "ASan/UBSan",
+      "inherits": "default",
+      "binaryDir": "${sourceDir}/build/sanitizers",
+      "cacheVariables": {
+        "CGRAPH_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "fuzzers",
+      "displayName": "libFuzzer + ASan/UBSan",
+      "inherits": "sanitizers",
+      "binaryDir": "${sourceDir}/build/fuzzers",
+      "cacheVariables": {
+        "CGRAPH_BUILD_FUZZERS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default"
+    },
+    {
+      "name": "sanitizers",
+      "configurePreset": "sanitizers"
+    },
+    {
+      "name": "fuzzers",
+      "configurePreset": "fuzzers"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "sanitizers",
+      "configurePreset": "sanitizers",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "fuzzers",
+      "configurePreset": "fuzzers",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

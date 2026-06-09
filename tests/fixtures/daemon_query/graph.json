@@ -1,0 +1,35 @@
+{
+  "directed": true,
+  "multigraph": false,
+  "graph": {
+    "build_state": 1,
+    "cache_hit_rate": 1.0
+  },
+  "nodes": [
+    {
+      "id": "alpha",
+      "label": "Alpha",
+      "source_file": "alpha.py",
+      "type": "class",
+      "confidence": "EXTRACTED",
+      "properties": {}
+    },
+    {
+      "id": "beta",
+      "label": "Beta",
+      "source_file": "beta.py",
+      "type": "function",
+      "confidence": "EXTRACTED",
+      "properties": {}
+    }
+  ],
+  "links": [
+    {
+      "source": "alpha",
+      "target": "beta",
+      "relation": "CALLS",
+      "confidence": "EXTRACTED",
+      "properties": {}
+    }
+  ]
+}

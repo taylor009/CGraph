@@ -1,0 +1,25 @@
+schema: spec-driven
+
+context: |
+  This project follows test-driven development.
+  For each behavior change, define the intended observable behavior first, add or update a failing test that captures it, then implement the smallest scoped code change that makes the test pass.
+  A task is not complete until the relevant test fails before implementation where practical, passes after implementation, and the full applicable suite has been run or an explicit reason is recorded.
+
+rules:
+  proposal:
+    - State the user-visible behavior or contract that tests will verify.
+    - Include non-goals when scope boundaries affect test coverage.
+  design:
+    - Identify the test strategy before implementation details.
+    - Call out any behavior that cannot be tested directly and explain the validation approach.
+  specs:
+    - Write requirements as observable behavior with scenario-style acceptance criteria.
+    - Prefer deterministic scenarios with concrete inputs, outputs, and failure modes.
+  tasks:
+    - Put test creation or test update before implementation for every behavior-bearing task.
+    - Do not mark implementation tasks complete until relevant tests pass.
+    - Record explicit verification commands for benchmark, integration, fuzz, or platform-sensitive work.
+  implementation:
+    - Follow red-green-refactor: add or update a focused failing test, implement the minimal fix, then run the relevant suite.
+    - Keep production changes scoped to the tested behavior.
+    - If a pre-failing test is impractical, document why and add the closest regression, integration, or smoke test before marking the task complete.
