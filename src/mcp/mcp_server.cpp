@@ -33,6 +33,15 @@ namespace {
       tool_schema("graph_query", "Search graph nodes by query text", {{"query", {{"type", "string"}}}}),
       tool_schema("graph_path", "Find a graph path between node ids", {{"source", {{"type", "string"}}}, {"target", {{"type", "string"}}}}),
       tool_schema("graph_explain", "Explain a graph node and its neighbors", {{"id", {{"type", "string"}}}}),
+      tool_schema(
+          "graph_impact",
+          "Transitive blast radius of a node: dependents (callers/importers that break if it changes), "
+          "dependencies (what it relies on), or both, bounded by max_depth",
+          {{"id", {{"type", "string"}}},
+           {"direction", {{"type", "string"}, {"enum", {"dependents", "dependencies", "both"}}}},
+           {"relation", {{"type", "string"}}},
+           {"max_depth", {{"type", "integer"}}},
+           {"limit", {{"type", "integer"}}}}),
       tool_schema("graph_update", "Request a deterministic graph update", {{"path", {{"type", "string"}}}}),
       tool_schema("graph_status", "Return daemon graph and enrichment status", nlohmann::json::object()),
       tool_schema("graph_shutdown", "Ask the daemon to shut down", nlohmann::json::object()),
@@ -48,6 +57,11 @@ namespace {
   }
   if (name == "graph_explain") {
     return make_request("explain", {{"id", arguments.value("id", std::string{})}});
+  }
+  if (name == "graph_impact") {
+    // Forward arguments verbatim; the daemon op applies direction/depth/limit
+    // defaults. id is required and carried through.
+    return make_request("impact", arguments);
   }
   if (name == "graph_update") {
     return make_request("update", arguments.empty() ? nlohmann::json::object() : arguments);

@@ -1,5 +1,6 @@
 #include "cgraph/incremental_update.hpp"
 
+#include "cgraph/analysis.hpp"
 #include "cgraph/detect.hpp"
 #include "cgraph/dedup.hpp"
 #include "cgraph/file_cache.hpp"
@@ -45,6 +46,11 @@ namespace {
   resolve_imports(graph, index.aliases);
   resolve_raw_calls(graph, raw_calls);
   resolve_raw_relations(graph, raw_relations);
+  // Run the same community + centrality analysis the one-shot pipeline does, so
+  // the resident daemon's graph carries degree_centrality / god_node / community
+  // — required for ranked query results and importance-aware blast radius.
+  detect_communities(graph);
+  analyze_graph(graph);
   return graph;
 }
 

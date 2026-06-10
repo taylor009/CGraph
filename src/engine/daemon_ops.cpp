@@ -3,11 +3,13 @@
 #include "cgraph/protocol.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace cgraph {
 namespace {
@@ -17,6 +19,12 @@ namespace {
 constexpr std::size_t kMaxSnippetLines = 40;
 constexpr std::size_t kMaxSnippetChars = 2000;
 
+// Default caps so a broad query or a wide blast radius stays bounded. 0 means
+// "no limit" when a caller passes it explicitly.
+constexpr std::size_t kDefaultQueryLimit = 50;
+constexpr std::size_t kDefaultImpactLimit = 200;
+constexpr int kDefaultImpactDepth = 3;
+
 [[nodiscard]] nlohmann::json error_response(std::string message) {
   return nlohmann::json{{"ok", false}, {"error", std::move(message)}};
 }
@@ -25,8 +33,22 @@ constexpr std::size_t kMaxSnippetChars = 2000;
   return nlohmann::json{{"ok", true}, {"result", std::move(result)}};
 }
 
+// Degree centrality (normalized 0..1) computed by analyze_graph and stored on
+// the node; 0 when absent (e.g. a snapshot that has not been analyzed).
+[[nodiscard]] double node_centrality(const Node& node) {
+  const auto it = node.properties.find("degree_centrality");
+  if (it == node.properties.end()) {
+    return 0.0;
+  }
+  const char* begin = it->second.c_str();
+  char* end = nullptr;
+  const double value = std::strtod(begin, &end);
+  return end == begin ? 0.0 : value;
+}
+
 // Compact, file-read-free descriptor: enough for an agent to open the symbol at
-// the right place (source_file + 1-based line) without a follow-up lookup.
+// the right place (source_file + 1-based line) and judge its importance
+// (centrality, god_node) without a follow-up lookup.
 [[nodiscard]] nlohmann::json node_brief(const Node& node) {
   nlohmann::json brief{{"id", node.id}, {"label", node.label}, {"kind", node.kind}};
   if (!node.source_file.empty()) {
@@ -34,6 +56,12 @@ constexpr std::size_t kMaxSnippetChars = 2000;
   }
   if (node.source_location && node.source_location->start_line > 0) {
     brief["line"] = node.source_location->start_line;
+  }
+  if (node.properties.contains("degree_centrality")) {
+    brief["centrality"] = node_centrality(node);
+  }
+  if (node.properties.contains("god_node")) {
+    brief["god_node"] = true;
   }
   return brief;
 }
@@ -106,11 +134,147 @@ struct Snippet {
 
 [[nodiscard]] nlohmann::json query_graph(const GraphSnapshot& graph, const nlohmann::json& params) {
   const auto needle = params.value("q", params.value("query", std::string{}));
+  auto matches = matching_nodes(graph, needle);
+
+  // Rank by importance so the most central (most-connected / god) nodes lead —
+  // an agent reading the top few results lands on the symbols that matter.
+  std::ranges::sort(matches, [](const Node* lhs, const Node* rhs) {
+    const auto lc = node_centrality(*lhs);
+    const auto rc = node_centrality(*rhs);
+    if (lc != rc) {
+      return lc > rc;
+    }
+    return lhs->label < rhs->label;  // stable, deterministic tiebreak
+  });
+
+  const auto total = matches.size();
+  const auto limit = params.value("limit", kDefaultQueryLimit);
+  if (limit > 0 && matches.size() > limit) {
+    matches.resize(limit);
+  }
+
   auto nodes = nlohmann::json::array();
-  for (const auto* node : matching_nodes(graph, needle)) {
+  for (const auto* node : matches) {
     nodes.push_back(node_brief(*node));
   }
-  return {{"nodes", std::move(nodes)}};
+  const auto returned = nodes.size();  // capture before the move below
+  return {{"nodes", std::move(nodes)}, {"total", total}, {"returned", returned}};
+}
+
+// Transitive blast radius: BFS from a node along directed edges. `dependents`
+// follows edges *into* the node (callers, importers, subclasses — what breaks if
+// you change it); `dependencies` follows edges *out* (what it relies on); `both`
+// unions the two. Optionally filtered to one relation, bounded by depth, and
+// capped. Results are ordered by depth, then by centrality within a depth.
+[[nodiscard]] nlohmann::json impact_radius(const GraphSnapshot& graph, const nlohmann::json& params) {
+  const auto id = params.value("id", std::string{});
+  const auto direction = params.value("direction", std::string{"dependents"});
+  const auto relation = params.value("relation", std::string{});
+  const auto max_depth = std::max(0, params.value("max_depth", kDefaultImpactDepth));
+  const auto limit = params.value("limit", kDefaultImpactLimit);
+
+  const auto by_id = index_nodes(graph);
+  if (!by_id.contains(id)) {
+    return {{"id", id}, {"direction", direction}, {"max_depth", max_depth},
+            {"total", 0}, {"returned", 0}, {"nodes", nlohmann::json::array()}};
+  }
+
+  const bool want_dependents = direction == "dependents" || direction == "both";
+  const bool want_dependencies = direction == "dependencies" || direction == "both";
+
+  // Adjacency in the requested direction(s), filtered by relation if given.
+  struct Link {
+    std::string to;
+    std::string relation;
+  };
+  std::unordered_map<std::string, std::vector<Link>> adjacency;
+  for (const auto& edge : graph.edges) {
+    if (!relation.empty() && edge.relation != relation) {
+      continue;
+    }
+    if (want_dependents) {
+      adjacency[edge.target].push_back({edge.source, edge.relation});  // who points at target
+    }
+    if (want_dependencies) {
+      adjacency[edge.source].push_back({edge.target, edge.relation});  // what source points to
+    }
+  }
+
+  struct Reached {
+    int depth = 0;
+    std::string via;
+  };
+  std::unordered_map<std::string, Reached> reached;
+  std::queue<std::string> frontier;
+  reached[id] = {0, {}};
+  frontier.push(id);
+  while (!frontier.empty()) {
+    const auto current = frontier.front();
+    frontier.pop();
+    const auto depth = reached[current].depth;
+    if (depth >= max_depth) {
+      continue;
+    }
+    const auto links = adjacency.find(current);
+    if (links == adjacency.end()) {
+      continue;
+    }
+    for (const auto& link : links->second) {
+      if (reached.contains(link.to)) {
+        continue;  // first (shortest) path wins
+      }
+      reached[link.to] = {depth + 1, link.relation};
+      frontier.push(link.to);
+    }
+  }
+
+  // Drop the seed itself; order by (depth asc, centrality desc).
+  std::vector<const Node*> hits;
+  for (const auto& [node_id, info] : reached) {
+    if (node_id == id) {
+      continue;
+    }
+    if (const auto it = by_id.find(node_id); it != by_id.end()) {
+      hits.push_back(it->second);
+    }
+  }
+  std::ranges::sort(hits, [&](const Node* lhs, const Node* rhs) {
+    const auto ld = reached[lhs->id].depth;
+    const auto rd = reached[rhs->id].depth;
+    if (ld != rd) {
+      return ld < rd;
+    }
+    const auto lc = node_centrality(*lhs);
+    const auto rc = node_centrality(*rhs);
+    if (lc != rc) {
+      return lc > rc;
+    }
+    return lhs->label < rhs->label;
+  });
+
+  const auto total = hits.size();
+  const bool truncated = limit > 0 && hits.size() > limit;
+  if (truncated) {
+    hits.resize(limit);
+  }
+
+  auto nodes = nlohmann::json::array();
+  for (const auto* node : hits) {
+    auto brief = node_brief(*node);
+    brief["depth"] = reached[node->id].depth;
+    if (!reached[node->id].via.empty()) {
+      brief["via"] = reached[node->id].via;
+    }
+    nodes.push_back(std::move(brief));
+  }
+
+  nlohmann::json result{
+      {"id", id}, {"direction", direction}, {"max_depth", max_depth},
+      {"total", total}, {"returned", nodes.size()}, {"nodes", std::move(nodes)}};
+  if (truncated) {
+    result["truncated"] = true;
+  }
+  return result;
 }
 
 [[nodiscard]] nlohmann::json explain_node(const GraphSnapshot& graph, const nlohmann::json& params) {
@@ -283,6 +447,9 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
   }
   if (op == "explain") {
     return ok_response(explain_node(*graph, params));
+  }
+  if (op == "impact") {
+    return ok_response(impact_radius(*graph, params));
   }
   if (op == "update") {
     if (state.update_handler) {

@@ -21,29 +21,70 @@ int main() {
   cgraph::DaemonState state;
   state.pid = 123;
   cgraph::GraphSnapshot graph;
+  // "a" is the central hub (centrality 1.0, a god node); "AlphaLeaf" also matches
+  // the "Alpha" query but is peripheral. Edges c -> a -> b form a chain so the
+  // blast radius has two depths to walk.
   graph.nodes.push_back(cgraph::Node{
       .id = "a",
       .label = "Alpha",
       .source_file = src.generic_string(),
       .source_location = cgraph::SourceLocation{.start_line = 2, .start_column = 0, .end_line = 4, .end_column = 1},
-      .kind = "class"});
+      .kind = "class",
+      .properties = {{"degree_centrality", "1.000000"}, {"god_node", "true"}}});
   graph.nodes.push_back(cgraph::Node{.id = "b", .label = "Beta", .kind = "function"});
+  graph.nodes.push_back(cgraph::Node{
+      .id = "c", .label = "AlphaLeaf", .kind = "function", .properties = {{"degree_centrality", "0.100000"}}});
   graph.edges.push_back(cgraph::Edge{.source = "a", .target = "b", .relation = "CALLS"});
+  graph.edges.push_back(cgraph::Edge{.source = "c", .target = "a", .relation = "CALLS"});
   cgraph::publish_graph_snapshot(state, std::move(graph));
 
   const auto status = cgraph::handle_daemon_request(state, cgraph::make_request("status"));
-  if (!status["ok"].get<bool>() || status["result"]["node_count"] != 2) {
+  if (!status["ok"].get<bool>() || status["result"]["node_count"] != 3) {
     return 1;
   }
 
   const auto query = cgraph::handle_daemon_request(state, cgraph::make_request("query", {{"q", "Alpha"}}));
-  const auto& query_nodes = query["result"]["nodes"];
-  if (query_nodes.empty()) {
+  const auto& query_result = query["result"];
+  const auto& query_nodes = query_result["nodes"];
+  // Both "Alpha" and "AlphaLeaf" match; total reflects the full match count.
+  if (query_nodes.size() != 2 || query_result.value("total", 0U) != 2U) {
     return 1;
   }
-  // Query results must carry file:line so the agent can open the symbol directly.
+  // Ranked by centrality: the hub "a" must lead, carrying file:line, its
+  // centrality, and the god_node flag so the agent can open and prioritize it.
   const auto& hit = query_nodes[0];
-  if (hit.value("source_file", std::string{}) != src.generic_string() || hit.value("line", 0U) != 2U) {
+  if (hit.value("source_file", std::string{}) != src.generic_string() || hit.value("line", 0U) != 2U ||
+      hit.value("centrality", 0.0) < 0.99 || !hit.value("god_node", false)) {
+    return 1;
+  }
+  if (query_nodes[1].value("label", std::string{}) != "AlphaLeaf") {
+    return 1;  // peripheral node ranked below the hub
+  }
+
+  // Blast radius: what breaks if "b" changes? Its dependents are "a" (depth 1,
+  // calls b) then "c" (depth 2, calls a). Ordered by depth.
+  const auto impact = cgraph::handle_daemon_request(
+      state, cgraph::make_request("impact", {{"id", "b"}, {"direction", "dependents"}, {"max_depth", 3}}));
+  const auto& impact_nodes = impact["result"]["nodes"];
+  if (impact["result"].value("total", 0U) != 2U || impact_nodes.size() != 2) {
+    return 1;
+  }
+  if (impact_nodes[0].value("id", std::string{}) != "a" || impact_nodes[0].value("depth", 0) != 1 ||
+      impact_nodes[1].value("id", std::string{}) != "c" || impact_nodes[1].value("depth", 0) != 2) {
+    return 1;
+  }
+  // Depth bound is honored: max_depth 1 reaches only the direct dependent.
+  const auto shallow = cgraph::handle_daemon_request(
+      state, cgraph::make_request("impact", {{"id", "b"}, {"direction", "dependents"}, {"max_depth", 1}}));
+  if (shallow["result"]["nodes"].size() != 1 || shallow["result"]["nodes"][0].value("id", std::string{}) != "a") {
+    return 1;
+  }
+  // Opposite direction: what does "c" depend on? a (depth 1) then b (depth 2).
+  const auto deps = cgraph::handle_daemon_request(
+      state, cgraph::make_request("impact", {{"id", "c"}, {"direction", "dependencies"}, {"max_depth", 3}}));
+  const auto& deps_nodes = deps["result"]["nodes"];
+  if (deps_nodes.size() != 2 || deps_nodes[0].value("id", std::string{}) != "a" ||
+      deps_nodes[1].value("id", std::string{}) != "b") {
     return 1;
   }
 
