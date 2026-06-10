@@ -18,9 +18,11 @@ The project is built around a simple split:
 
 ## Status
 
-CGraph is an early native implementation. The public command surface is present,
-but the project does not currently include an installer or packaged release
-flow. Build it from source with CMake and vcpkg.
+CGraph is an early native implementation. The full command surface (CLI, daemon,
+thin client, MCP server) is present and tested, but there is no packaged release
+or `cmake --install` flow yet — you build it from source with CMake and vcpkg and
+run the binaries from the build tree (or symlink them onto your `PATH`). See
+[Install & Setup](#install--setup).
 
 ## Features
 
@@ -56,74 +58,113 @@ docs/             Host integration contract and benchmark notes
 vendor/           Vendored tree-sitter core and grammars
 ```
 
-## Requirements
+## Install & Setup
+
+### Prerequisites
 
 - CMake 3.25 or newer
 - Ninja
-- A C++20 compiler
-- vcpkg, with `VCPKG_ROOT` set
-- vcpkg dependencies from `vcpkg.json`: `curl`, `igraph`, `nlohmann-json`, and
-  `utf8proc`
+- A C++20 compiler (recent Clang or GCC; Apple Clang from Xcode Command Line Tools works)
+- Git
+- vcpkg (a local copy is fine — see step 2). Dependencies `curl`, `igraph`,
+  `nlohmann-json`, and `utf8proc` are declared in `vcpkg.json` and built
+  automatically on first configure. `tree-sitter` is vendored under
+  `vendor/tree-sitter`.
 
-The default CMake preset uses:
+### 1. Clone
 
-```text
-$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+```sh
+git clone https://github.com/taylor009/CGraph.git
+cd CGraph
 ```
 
-## Build
+### 2. Point CMake at vcpkg
 
-Configure and build the default debug preset:
+The presets read the toolchain from `$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake`,
+and `VCPKG_ROOT` is **not** set for you. Use an existing vcpkg checkout:
+
+```sh
+export VCPKG_ROOT="/path/to/your/vcpkg"
+```
+
+…or bootstrap a local copy inside the repo (this is what the presets expect by
+default; `.vcpkg/` is gitignored):
+
+```sh
+git clone https://github.com/microsoft/vcpkg .vcpkg
+./.vcpkg/bootstrap-vcpkg.sh
+export VCPKG_ROOT="$PWD/.vcpkg"
+```
+
+Add the `export` line to your shell profile (or re-run it each session) — every
+`cmake`/`ctest` invocation below needs it.
+
+### 3. Configure and build
 
 ```sh
 cmake --preset default
 cmake --build --preset default
 ```
 
-The default preset writes build output to:
+The first build also compiles the vcpkg dependencies (igraph, curl, …), so it
+takes several minutes; later builds are incremental. Output lands in
+`build/default`, with binaries at:
 
 ```text
-build/default
+build/default/src/cli/cgraph
+build/default/src/daemon/graphd
+build/default/src/client/cgraph-client
+build/default/src/mcp/cgraph-mcp
 ```
+
+### 4. Verify
+
+```sh
+ctest --preset default                                  # run the smoke suite
+build/default/src/cli/cgraph --root . --out cgraph-out  # build a graph of this repo
+```
+
+Open `cgraph-out/graph.html` in a browser to confirm the interactive view.
+
+### 5. (Optional) Put the binaries on your PATH
+
+There is no install target, but symlinking the four binaries into a directory
+on your `PATH` lets you call them by name (`cgraph`, `graphd`, `cgraph-client`,
+`cgraph-mcp`) instead of by build path:
+
+```sh
+mkdir -p ~/.local/bin
+for b in cli/cgraph daemon/graphd client/cgraph-client mcp/cgraph-mcp; do
+  ln -sf "$PWD/build/default/src/$b" ~/.local/bin/
+done
+# ensure ~/.local/bin is on PATH
+```
+
+> Note: MCP client configs (below) should still use absolute paths to the
+> binaries, since a client may not inherit your interactive shell's `PATH`.
+
+### Development builds
 
 Build with AddressSanitizer and UndefinedBehaviorSanitizer:
 
 ```sh
 cmake --preset sanitizers
 cmake --build --preset sanitizers
+ctest --preset sanitizers
 ```
 
-Build fuzzer targets:
+Build and smoke-test fuzzer targets:
 
 ```sh
 cmake --preset fuzzers
 cmake --build --preset fuzzers
+ctest --preset fuzzers
 ```
 
 The fuzzer preset requires a Clang toolchain with the libFuzzer runtime. Some
 Apple Command Line Tools installations do not provide that runtime; use an
 upstream LLVM/Clang toolchain when the fuzzer configure step fails for that
 reason.
-
-## Test
-
-Run the default smoke suite:
-
-```sh
-ctest --preset default
-```
-
-Run the sanitizer suite:
-
-```sh
-ctest --preset sanitizers
-```
-
-Run fuzzer smoke tests after configuring the fuzzer preset:
-
-```sh
-ctest --preset fuzzers
-```
 
 ## Quick Start
 
@@ -146,6 +187,125 @@ cgraph-out/call-flow.html
 
 Open `cgraph-out/graph.html` in a browser for an interactive local graph
 view, or consume `cgraph-out/graph.json` from other tools.
+
+## Use with Coding Agents
+
+`cgraph-mcp` is a standard [Model Context Protocol](https://modelcontextprotocol.io)
+server over stdio (newline-delimited JSON-RPC, protocol `2024-11-05`). Register it
+once and your agent can navigate the codebase through fast graph queries instead
+of blind grep/read. It exposes eight tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `graph_query` | Search nodes by text; ranked by centrality |
+| `graph_explain` | A node's neighborhood (callers, callees, imports) |
+| `graph_impact` | Transitive blast radius of changing a node |
+| `graph_path` | Shortest path between two nodes |
+| `graph_context` | Token-budgeted source bundle for a node/query |
+| `graph_update` | Re-scan the project into the graph |
+| `graph_status` | Daemon, graph, and enrichment status |
+| `graph_shutdown` | Stop the daemon |
+
+The server resolves the project root from `--root`, then `CLAUDE_PROJECT_DIR`,
+then the working directory. Pass `--daemon <path-to-graphd>` so it auto-spawns a
+per-project daemon on the first call (without it, no daemon is started). The
+first call triggers a one-time graph build (seconds); subsequent queries are
+warm (~10ms).
+
+In the examples below, replace `/abs/path/to/CGraph` with this repo's absolute
+path.
+
+### Claude Code
+
+Claude Code sets `CLAUDE_PROJECT_DIR` per session, so a single registration works
+across every project — no per-project root needed. Add it with the CLI:
+
+```sh
+claude mcp add --scope user --transport stdio cgraph \
+  -- /abs/path/to/CGraph/build/default/src/mcp/cgraph-mcp \
+     --daemon /abs/path/to/CGraph/build/default/src/daemon/graphd
+```
+
+Or, to share it with a repo's collaborators, commit a project-scoped `.mcp.json`
+at the repo root:
+
+```json
+{
+  "mcpServers": {
+    "cgraph": {
+      "command": "/abs/path/to/CGraph/build/default/src/mcp/cgraph-mcp",
+      "args": ["--daemon", "/abs/path/to/CGraph/build/default/src/daemon/graphd"]
+    }
+  }
+}
+```
+
+Verify with `/mcp` inside Claude Code; you should see `cgraph` connected with its
+tools. This repo also ships a `cgraph` skill (`integrations/skills/cgraph/`) that
+tells the agent to reach for these tools first for codebase-structure questions —
+copy it into your agent's skills directory to enable it.
+
+### Codex CLI
+
+Codex does not set `CLAUDE_PROJECT_DIR`, so the server falls back to the working
+directory Codex launches it from (normally the project you opened). Add it with:
+
+```sh
+codex mcp add cgraph \
+  -- /abs/path/to/CGraph/build/default/src/mcp/cgraph-mcp \
+     --daemon /abs/path/to/CGraph/build/default/src/daemon/graphd
+```
+
+…or edit `~/.codex/config.toml` directly:
+
+```toml
+[mcp_servers.cgraph]
+command = "/abs/path/to/CGraph/build/default/src/mcp/cgraph-mcp"
+args = ["--daemon", "/abs/path/to/CGraph/build/default/src/daemon/graphd"]
+```
+
+To pin a specific project regardless of working directory (e.g. a project-scoped
+`.codex/config.toml`), add the root to `args`:
+
+```toml
+[mcp_servers.cgraph]
+command = "/abs/path/to/CGraph/build/default/src/mcp/cgraph-mcp"
+args = [
+  "--root", "/abs/path/to/your/project",
+  "--daemon", "/abs/path/to/CGraph/build/default/src/daemon/graphd",
+]
+```
+
+Restart Codex after editing the config and run `/mcp` in the TUI to confirm.
+
+### Cursor, Windsurf, and other MCP clients
+
+Any MCP client that launches a stdio command works. Add a server entry with the
+command and args (most use a `mcpServers` JSON block like Claude Code's
+`.mcp.json` above):
+
+```json
+{
+  "mcpServers": {
+    "cgraph": {
+      "command": "/abs/path/to/CGraph/build/default/src/mcp/cgraph-mcp",
+      "args": [
+        "--root", "/abs/path/to/your/project",
+        "--daemon", "/abs/path/to/CGraph/build/default/src/daemon/graphd"
+      ]
+    }
+  }
+}
+```
+
+Set `--root` explicitly for clients that do not set `CLAUDE_PROJECT_DIR` or a
+project working directory. You can also smoke-test the server by hand:
+
+```sh
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  | build/default/src/mcp/cgraph-mcp --root . \
+      --daemon build/default/src/daemon/graphd
+```
 
 ## CLI
 
@@ -221,9 +381,13 @@ Build target:
 build/default/src/mcp/cgraph-mcp
 ```
 
-`cgraph-mcp` reads JSON requests from standard input, routes them through the
-same daemon operation handler used by the thin client, and writes JSON responses
-to standard output. Invalid JSON receives a JSON-RPC parse error response.
+`cgraph-mcp` speaks MCP over stdio: newline-delimited JSON-RPC 2.0 implementing
+`initialize`, `tools/list`, `tools/call`, and `notifications/initialized`
+(protocol version `2024-11-05`). Tool calls route through the same daemon
+operation handler used by the thin client; invalid JSON receives a JSON-RPC
+parse error response. For registering it with Claude Code, Codex, and other MCP
+clients — and the list of exposed tools — see
+[Use with Coding Agents](#use-with-coding-agents).
 
 ## Host Integrations
 
