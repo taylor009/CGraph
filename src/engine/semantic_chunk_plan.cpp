@@ -30,7 +30,21 @@ namespace {
   return skipped.contains(name);
 }
 
-[[nodiscard]] std::vector<std::filesystem::path> collect_semantic_paths(const std::filesystem::path& root) {
+[[nodiscard]] bool is_excluded_dir(
+    const std::filesystem::path& dir,
+    const std::vector<std::filesystem::path>& excluded) {
+  std::error_code ec;
+  for (const auto& candidate : excluded) {
+    if (std::filesystem::equivalent(dir, candidate, ec)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] std::vector<std::filesystem::path> collect_semantic_paths(
+    const std::filesystem::path& root,
+    const std::vector<std::filesystem::path>& excluded_dirs) {
   std::vector<std::filesystem::path> paths;
   std::error_code error;
   std::filesystem::recursive_directory_iterator iterator(
@@ -43,7 +57,7 @@ namespace {
     const auto& entry = *iterator;
     const auto name = entry.path().filename().generic_string();
     if (entry.is_directory(error)) {
-      if (is_skipped_directory(name)) {
+      if (is_skipped_directory(name) || is_excluded_dir(entry.path(), excluded_dirs)) {
         iterator.disable_recursion_pending();
       }
       continue;
@@ -103,7 +117,7 @@ SemanticChunkPlan plan_semantic_chunks(
   SemanticChunk current_chunk;
   std::uintmax_t current_bytes = 0;
 
-  for (const auto& path : collect_semantic_paths(root)) {
+  for (const auto& path : collect_semantic_paths(root, options.excluded_dirs)) {
     const auto hash = sha256_file_hex(path);
     const auto cached = cache.find_by_content_hash(hash);
     if (cached.has_value() && is_valid_cached_record(*cached)) {

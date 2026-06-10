@@ -34,6 +34,10 @@ struct SemanticChunkPlan {
 struct SemanticChunkPlanOptions {
   std::size_t max_files_per_chunk = 8;
   std::uintmax_t max_bytes_per_chunk = 1024 * 1024;
+  // Directories never scanned for semantic inputs — the export output and the
+  // semantic drop directory, so the tool never tries to enrich its own exports
+  // or re-ingest already-dropped `chunk_NN.json` fragments as fresh documents.
+  std::vector<std::filesystem::path> excluded_dirs;
 };
 
 [[nodiscard]] SemanticChunkPlan plan_semantic_chunks(

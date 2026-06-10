@@ -380,6 +380,18 @@ cgraph_enable_sanitizers(cgraph_tsconfig_aliases_test)
 
 add_test(NAME cgraph_tsconfig_aliases_test COMMAND cgraph_tsconfig_aliases_test)
 
+add_executable(cgraph_semantic_orchestration_test
+  semantic_orchestration_test.cpp)
+
+target_link_libraries(cgraph_semantic_orchestration_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_semantic_orchestration_test)
+cgraph_enable_sanitizers(cgraph_semantic_orchestration_test)
+
+add_test(NAME cgraph_semantic_orchestration_test COMMAND cgraph_semantic_orchestration_test)
+
 add_executable(cgraph_dedup_test
   dedup_test.cpp)
 

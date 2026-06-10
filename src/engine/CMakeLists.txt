@@ -30,6 +30,7 @@ add_library(cgraph_engine STATIC
   semantic_drop.cpp
   semantic_fragment_validation.cpp
   semantic_ingest.cpp
+  semantic_orchestration.cpp
   tsconfig_aliases.cpp)
 
 add_library(cgraph::engine ALIAS cgraph_engine)
