@@ -70,6 +70,43 @@ int main() {
   const auto query = request_with_retry(socket_path, cgraph::make_request("query", {{"q", "beta"}}));
   ok = ok && query && (*query)["ok"] == true && !(*query)["result"]["nodes"].empty();
 
+  // Semantic enrichment: drop a valid fragment into the daemon's drop dir and
+  // the watcher must merge it into the live snapshot (no update op issued).
+  const auto nodes_pre_enrich = nodes_after;
+  write_file(root / "graphify-out" / "semantic-drop" / "chunk_00.json", R"({
+    "nodes": [
+      {"id": "doc:guide", "label": "Guide", "type": "document"},
+      {"id": "concept:topic", "label": "Topic", "type": "concept"}
+    ],
+    "edges": [{"source": "doc:guide", "target": "concept:topic", "relation": "DESCRIBES"}]
+  })");
+  bool enriched = false;
+  for (int attempt = 0; attempt < 200 && !enriched; ++attempt) {
+    const auto s = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("status"));
+    enriched = s && (*s)["result"].value("node_count", 0) >= nodes_pre_enrich + 2;
+    if (!enriched) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+  ok = ok && enriched;
+  const auto topic = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("query", {{"q", "Topic"}}));
+  ok = ok && topic && !(*topic)["result"]["nodes"].empty();
+
+  // A malformed fragment is rejected: enrichment_state goes failed, graph unchanged.
+  write_file(root / "graphify-out" / "semantic-drop" / "chunk_01.json", R"({"nodes":[{"id":"x"}],"edges":[]})");
+  bool failed_seen = false;
+  int nodes_at_fail = 0;
+  for (int attempt = 0; attempt < 200 && !failed_seen; ++attempt) {
+    const auto s = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("status"));
+    if (s && (*s)["result"]["enrichment_state"] == "failed") {
+      failed_seen = true;
+      nodes_at_fail = (*s)["result"].value("node_count", 0);
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+  ok = ok && failed_seen && nodes_at_fail == nodes_pre_enrich + 2;  // bad fragment added nothing
+
   // An unknown op is an error, not a crash; shutdown stops the loop cleanly.
   const auto bad = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("nonsense"));
   ok = ok && bad && (*bad)["ok"] == false;

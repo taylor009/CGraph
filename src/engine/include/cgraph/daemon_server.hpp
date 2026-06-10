@@ -14,6 +14,11 @@ struct DaemonServerOptions {
   // When false, the graph is built synchronously before the socket is accepted
   // on (the default); tests can disable to serve an empty graph immediately.
   bool build_graph_on_start = true;
+  // Directory the daemon watches for host-dropped chunk_NN.json fragments.
+  // Empty -> default_semantic_drop_dir(root / "graphify-out").
+  std::filesystem::path drop_dir;
+  // How often the serve loop polls the drop directory for new fragments.
+  std::chrono::milliseconds drop_poll_interval{200};
 };
 
 // Runs the per-project daemon: builds the deterministic graph for `root`, binds

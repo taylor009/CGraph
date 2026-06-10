@@ -37,6 +37,27 @@ std::string fragment_filename_for_chunk(std::size_t chunk_index) {
   return name.str();
 }
 
+std::unordered_map<std::size_t, std::vector<fs::path>> load_chunk_sources(const fs::path& drop_dir) {
+  std::unordered_map<std::size_t, std::vector<fs::path>> sources_by_chunk;
+  std::ifstream manifest_file(drop_dir / kManifestName, std::ios::binary);
+  if (!manifest_file) {
+    return sources_by_chunk;
+  }
+  const auto manifest = nlohmann::json::parse(manifest_file, nullptr, false);
+  if (manifest.is_discarded()) {
+    return sources_by_chunk;
+  }
+  for (const auto& chunk : manifest.value("chunks", nlohmann::json::array())) {
+    const auto index = chunk.value("index", std::size_t{0});
+    for (const auto& input : chunk.value("inputs", nlohmann::json::array())) {
+      if (const auto path = input.value("path", std::string{}); !path.empty()) {
+        sources_by_chunk[index].emplace_back(path);
+      }
+    }
+  }
+  return sources_by_chunk;
+}
+
 EnrichmentPlanResult plan_enrichment(const std::filesystem::path& root, const std::filesystem::path& drop_dir) {
   EnrichmentPlanResult result;
   result.drop_dir = drop_dir;
@@ -96,20 +117,7 @@ EnrichmentIngestResult ingest_enrichment(const std::filesystem::path& root, cons
 
   // Map chunk index -> its source input paths, recovered from the manifest, so
   // each merged fragment is cached against the document(s) it enriches.
-  std::unordered_map<std::size_t, std::vector<fs::path>> sources_by_chunk;
-  if (std::ifstream manifest_file(drop_dir / kManifestName, std::ios::binary); manifest_file) {
-    const auto manifest = nlohmann::json::parse(manifest_file, nullptr, false);
-    if (!manifest.is_discarded()) {
-      for (const auto& chunk : manifest.value("chunks", nlohmann::json::array())) {
-        const auto index = chunk.value("index", std::size_t{0});
-        for (const auto& input : chunk.value("inputs", nlohmann::json::array())) {
-          if (const auto path = input.value("path", std::string{}); !path.empty()) {
-            sources_by_chunk[index].emplace_back(path);
-          }
-        }
-      }
-    }
-  }
+  const auto sources_by_chunk = load_chunk_sources(drop_dir);
 
   for (const auto& drop : discover_semantic_fragment_drops(drop_dir)) {
     const auto sources = sources_by_chunk.find(drop.chunk_index);

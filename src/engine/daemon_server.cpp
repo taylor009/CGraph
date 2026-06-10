@@ -6,6 +6,15 @@
 #include "cgraph/daemon_ops.hpp"
 #include "cgraph/incremental_update.hpp"
 #include "cgraph/protocol.hpp"
+#include "cgraph/semantic_cache.hpp"
+#include "cgraph/semantic_chunk_plan.hpp"
+#include "cgraph/semantic_drop.hpp"
+#include "cgraph/semantic_ingest.hpp"
+#include "cgraph/semantic_orchestration.hpp"
+
+#include "cgraph/file_watcher.hpp"
+
+#include <unordered_map>
 
 #include <array>
 #include <cstring>
@@ -147,13 +156,77 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   DaemonState state;
   state.pid = ::getpid();
 
+  // Semantic enrichment: the daemon watches a drop directory for host-computed
+  // chunk_NN.json fragments, merges valid ones into the live snapshot through
+  // the single-writer path, and surfaces progress via the enrichment_* status
+  // fields. Source attribution for each fragment comes from the plan manifest.
+  const auto drop_dir = options.drop_dir.empty()
+                            ? default_semantic_drop_dir(identity.project_root / "graphify-out")
+                            : options.drop_dir;
+  const auto cache_path = drop_dir / "semantic-cache.json";
+  SemanticCache cache = read_semantic_cache(cache_path);
+  SemanticFragmentDropWatcher drop_watcher(drop_dir);
+
+  const auto refresh_enrichment_state = [&]() {
+    SemanticChunkPlanOptions plan_options;
+    plan_options.excluded_dirs = {drop_dir};
+    if (drop_dir.has_parent_path()) {
+      plan_options.excluded_dirs.push_back(drop_dir.parent_path());
+    }
+    const auto plan = plan_semantic_chunks(identity.project_root, cache, plan_options);
+    std::size_t pending = 0;
+    for (const auto& chunk : plan.chunks) {
+      pending += chunk.inputs.size();
+    }
+    state.enrichment_pending = pending;
+    state.enrichment_stale = plan.stale_inputs;
+    state.enrichment_state = state.enrichment_failed > 0  ? EnrichmentState::Failed
+                             : pending > 0                ? EnrichmentState::Pending
+                                                          : EnrichmentState::Idle;
+  };
+
+  // Merges one dropped fragment, caching it against its manifest source(s).
+  const auto ingest_drop = [&](const SemanticFragmentDrop& drop,
+                               const std::unordered_map<std::size_t, std::vector<std::filesystem::path>>& sources) {
+    const auto entry = sources.find(drop.chunk_index);
+    const std::filesystem::path source =
+        (entry != sources.end() && !entry->second.empty()) ? entry->second.front() : drop.path;
+    const auto result = ingest_semantic_fragment(state, cache, source, drop.path);
+    if (!result.merged) {
+      ++state.enrichment_failed;
+      return false;
+    }
+    if (entry != sources.end()) {
+      for (std::size_t i = 1; i < entry->second.size(); ++i) {
+        cache.upsert(make_semantic_cache_record(entry->second[i], drop.path, SemanticCacheState::Valid));
+      }
+    }
+    return true;
+  };
+
+  // Re-overlays every present fragment. Run after a deterministic rescan (which
+  // rebuilds from code only and would otherwise drop merged semantic nodes).
+  const auto ingest_all_drops = [&]() {
+    const auto sources = load_chunk_sources(drop_dir);
+    bool merged_any = false;
+    for (const auto& drop : discover_semantic_fragment_drops(drop_dir)) {
+      merged_any = ingest_drop(drop, sources) || merged_any;
+    }
+    if (merged_any) {
+      write_semantic_cache(cache, cache_path);
+    }
+  };
+
   // The daemon owns the incremental file index: startup and every `update` op
-  // rebuild the graph the same way, so `update .` (a full stat-index rescan)
-  // keeps the resident snapshot current. `update` is wired through the state's
-  // injectable handler so all op dispatch stays in handle_daemon_request.
+  // rebuild the graph the same way (a full stat-index rescan), then re-overlay
+  // semantic fragments, so `update .` keeps the resident snapshot current
+  // without discarding enrichment. Wired through the injectable handler so all
+  // op dispatch stays in handle_daemon_request.
   IncrementalGraphIndex index;
   const auto rescan = [&]() {
     const auto result = full_stat_index_rescan(state, index, identity.project_root);
+    ingest_all_drops();
+    refresh_enrichment_state();
     const auto graph = read_graph_snapshot(state);
     return nlohmann::json{
         {"accepted", true},
@@ -169,15 +242,20 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   if (options.build_graph_on_start) {
     (void)rescan();
   }
+  drop_watcher.poll(FileWatcherClock::now());  // prime: existing drops are already overlaid
 
   std::cerr << "graphd listening on " << socket_path << " for root " << identity.project_root << '\n';
 
+  auto last_activity = FileWatcherClock::now();
   while (!state.shutdown_requested) {
     fd_set read_set;
     FD_ZERO(&read_set);
     FD_SET(listen_fd, &read_set);
     timeval timeout{};
-    timeout.tv_sec = static_cast<time_t>(options.idle_timeout.count());
+    timeout.tv_usec = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::microseconds>(options.drop_poll_interval).count() % 1'000'000);
+    timeout.tv_sec = static_cast<time_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(options.drop_poll_interval).count());
 
     const int ready = ::select(listen_fd + 1, &read_set, nullptr, nullptr, &timeout);
     if (ready < 0) {
@@ -187,9 +265,29 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
       std::cerr << "graphd: select() failed: " << std::strerror(errno) << '\n';
       break;
     }
+
+    // Ingest any debounced fragment drops discovered since the last tick.
+    if (const auto events = drop_watcher.poll(FileWatcherClock::now()); !events.empty()) {
+      const auto sources = load_chunk_sources(drop_dir);
+      bool merged_any = false;
+      for (const auto& event : events) {
+        if (event.change == SemanticFragmentDropChange::Deleted) {
+          continue;
+        }
+        merged_any = ingest_drop(event.drop, sources) || merged_any;
+      }
+      if (merged_any) {
+        write_semantic_cache(cache, cache_path);
+      }
+      refresh_enrichment_state();
+    }
+
     if (ready == 0) {
-      std::cerr << "graphd: idle timeout, shutting down\n";
-      break;
+      if (FileWatcherClock::now() - last_activity >= options.idle_timeout) {
+        std::cerr << "graphd: idle timeout, shutting down\n";
+        break;
+      }
+      continue;  // no connection this tick; keep polling drops
     }
 
     const int conn = ::accept(listen_fd, nullptr, nullptr);
@@ -199,6 +297,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
       }
       break;
     }
+    last_activity = FileWatcherClock::now();
     // The thin client uses one connection per request: read it, answer it, close.
     if (const auto request = read_frame(conn)) {
       const auto response = handle_daemon_request(state, *request);

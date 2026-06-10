@@ -3,8 +3,10 @@
 #include "cgraph/semantic_chunk_plan.hpp"
 #include "cgraph/types.hpp"
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace cgraph {
@@ -48,5 +50,11 @@ struct EnrichmentIngestResult {
 
 // The fragment filename a host must drop for a given chunk index ("chunk_03.json").
 [[nodiscard]] std::string fragment_filename_for_chunk(std::size_t chunk_index);
+
+// Maps each chunk index to its source input paths, read from the drop dir's
+// `plan.json` manifest (empty when absent). Used to attribute an ingested
+// fragment to the document(s) it enriches when updating the content-hash cache.
+[[nodiscard]] std::unordered_map<std::size_t, std::vector<std::filesystem::path>> load_chunk_sources(
+    const std::filesystem::path& drop_dir);
 
 }  // namespace cgraph
