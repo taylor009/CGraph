@@ -246,6 +246,12 @@ void walk_node(
       auto id = add_symbol_node(node, config, context, "function", fragment);
       if (!id.empty()) {
         add_containment_edge(scope_id, scope_kind, id, "function", fragment);
+        // Offer the function to the relation handler too, so a language can emit
+        // references from its parameter/return types (C/C++ free functions and
+        // methods). Handlers that only care about types/classes no-op here.
+        if (config.relation_handler) {
+          config.relation_handler(node, context, id, raw_relations);
+        }
         child_scope = id;
         child_kind = "function";
       }

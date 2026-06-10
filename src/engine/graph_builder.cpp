@@ -120,6 +120,7 @@ void resolve_imports(GraphSnapshot& graph, std::span<const PathAlias> aliases) {
   // package directory ("./utils", "../lib/foo") resolve to the real file node.
   std::unordered_map<std::string, std::string> file_id_by_key;
   std::unordered_map<std::string, std::string> source_of_file;
+  std::vector<std::pair<std::string, std::string>> files_by_path;  // (normalized path, id) for suffix matching
   for (const auto& node : graph.nodes) {
     if (node.kind != "file") {
       continue;
@@ -131,7 +132,26 @@ void resolve_imports(GraphSnapshot& graph, std::span<const PathAlias> aliases) {
     if (path.stem() == "index") {
       file_id_by_key.emplace(path.parent_path().generic_string(), node.id);
     }
+    files_by_path.emplace_back(path.generic_string(), node.id);
   }
+
+  // Resolve a header-style include spec ("cgraph/types.hpp") to the project file
+  // whose path ends with it — how an include directory resolves a header without
+  // the consumer knowing the include roots. Returns a match only when exactly one
+  // file qualifies, so an ambiguous spec yields no (wrong) edge.
+  const auto suffix_match = [&](const std::string& spec) -> std::optional<std::string> {
+    const std::string needle = "/" + spec;
+    std::optional<std::string> match;
+    for (const auto& [path, id] : files_by_path) {
+      if (path == spec || path.ends_with(needle)) {
+        if (match) {
+          return std::nullopt;  // ambiguous
+        }
+        match = id;
+      }
+    }
+    return match;
+  };
 
   const auto lookup = [&](const std::string& candidate) -> std::optional<std::string> {
     const fs::path path = fs::path(candidate).lexically_normal();
@@ -164,7 +184,9 @@ void resolve_imports(GraphSnapshot& graph, std::span<const PathAlias> aliases) {
         return resolved;
       }
     }
-    return std::nullopt;
+    // Last resort: header-style suffix match (C/C++ #include resolved via an
+    // include directory). Only used when direct/alias lookup found nothing.
+    return suffix_match(import_path);
   };
 
   std::unordered_set<std::string> node_ids;
@@ -384,6 +406,27 @@ void resolve_raw_relations(GraphSnapshot& graph, std::span<const RawRelation> ra
     }
   }
 
+  // C/C++ `#include` imports a whole file, not named symbols, so a referenced
+  // type (a base class, a parameter type) is declared in an included *file*
+  // rather than imported by name. Map each importer file to the source paths of
+  // the files it includes, so a relation target can resolve to a declaration in
+  // any of them.
+  std::unordered_map<std::string, std::string> file_source_by_id;
+  for (const auto& node : graph.nodes) {
+    if (node.kind == "file") {
+      file_source_by_id.emplace(node.id, node.source_file);
+    }
+  }
+  std::unordered_map<std::string, std::vector<std::string>> included_files_by_file;
+  for (const auto& edge : graph.edges) {
+    if (edge.relation != "imports" && edge.relation != "re_exports") {
+      continue;
+    }
+    if (const auto src = file_source_by_id.find(edge.target); src != file_source_by_id.end()) {
+      included_files_by_file[edge.source].push_back(src->second);
+    }
+  }
+
   std::unordered_set<std::string> seen_edges;
   seen_edges.reserve(graph.edges.size());
   for (const auto& edge : graph.edges) {
@@ -401,6 +444,23 @@ void resolve_raw_relations(GraphSnapshot& graph, std::span<const RawRelation> ra
     if (const auto file = imported_by_file.find(make_id(relation.source_file)); file != imported_by_file.end()) {
       if (const auto slot = file->second.find(key); slot != file->second.end()) {
         target_id = slot->second;
+      }
+    }
+    // 1b. The type is declared in a file the source file #includes (C/C++
+    //     whole-file import). Resolve against declarations in each included file.
+    if (target_id.empty()) {
+      if (const auto inc = included_files_by_file.find(make_id(relation.source_file)); inc != included_files_by_file.end()) {
+        for (const auto& included_source : inc->second) {
+          const auto file = local_by_file.find(included_source);
+          if (file == local_by_file.end()) {
+            continue;
+          }
+          const auto slot = file->second.find(key);
+          if (slot != file->second.end() && !slot->second.empty()) {
+            target_id = slot->second;
+            break;
+          }
+        }
       }
     }
     // 2. Heritage may also resolve to a same-file declaration (`class A extends

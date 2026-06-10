@@ -8,6 +8,7 @@ add_library(cgraph_engine STATIC
   daemon_security.cpp
   daemon_identity.cpp
   dedup.cpp
+  cpp_extractor.cpp
   detect.cpp
   engine.cpp
   extractor.cpp

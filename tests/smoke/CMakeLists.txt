@@ -130,6 +130,18 @@ cgraph_enable_sanitizers(cgraph_javascript_extractor_test)
 
 add_test(NAME cgraph_javascript_extractor_test COMMAND cgraph_javascript_extractor_test)
 
+add_executable(cgraph_cpp_extractor_test
+  cpp_extractor_test.cpp)
+
+target_link_libraries(cgraph_cpp_extractor_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_cpp_extractor_test)
+cgraph_enable_sanitizers(cgraph_cpp_extractor_test)
+
+add_test(NAME cgraph_cpp_extractor_test COMMAND cgraph_cpp_extractor_test)
+
 add_executable(cgraph_non_grammar_extractors_test
   non_grammar_extractors_test.cpp)
 

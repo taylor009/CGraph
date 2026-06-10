@@ -1,0 +1,147 @@
+#include "cgraph/pipeline.hpp"
+
+#include <filesystem>
+#include <fstream>
+#include <string>
+
+namespace {
+
+namespace fs = std::filesystem;
+
+void write_file(const fs::path& path, std::string contents) {
+  fs::create_directories(path.parent_path());
+  std::ofstream(path, std::ios::binary) << contents;
+}
+
+// True when an edge with the given relation connects the node labelled `source`
+// to the node labelled `target`. Matching on labels keeps the test independent
+// of the id-normalization scheme.
+[[nodiscard]] bool has_edge(const cgraph::GraphSnapshot& graph, const std::string& source,
+                            const std::string& target, const std::string& relation) {
+  for (const auto& edge : graph.edges) {
+    if (edge.relation != relation) {
+      continue;
+    }
+    const cgraph::Node* s = nullptr;
+    const cgraph::Node* t = nullptr;
+    for (const auto& node : graph.nodes) {
+      if (node.id == edge.source) {
+        s = &node;
+      }
+      if (node.id == edge.target) {
+        t = &node;
+      }
+    }
+    if (s != nullptr && t != nullptr && s->label == source && t->label == target) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Like has_edge but matches file nodes by label suffix, since file-node labels
+// are root-relative paths (`.../include/types.hpp`) rather than bare names.
+[[nodiscard]] bool has_edge_suffix(const cgraph::GraphSnapshot& graph, const std::string& source_suffix,
+                                   const std::string& target_suffix, const std::string& relation) {
+  for (const auto& edge : graph.edges) {
+    if (edge.relation != relation) {
+      continue;
+    }
+    const cgraph::Node* s = nullptr;
+    const cgraph::Node* t = nullptr;
+    for (const auto& node : graph.nodes) {
+      if (node.id == edge.source) {
+        s = &node;
+      }
+      if (node.id == edge.target) {
+        t = &node;
+      }
+    }
+    if (s != nullptr && t != nullptr && s->label.ends_with(source_suffix) && t->label.ends_with(target_suffix)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] bool has_node(const cgraph::GraphSnapshot& graph, const std::string& label, const std::string& kind) {
+  for (const auto& node : graph.nodes) {
+    if (node.label == label && node.kind == kind) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
+// End-to-end C++ extraction through the deterministic pipeline: a header declares
+// a base struct and a payload type; a .cpp includes it, derives a class with a
+// data member and an overriding method, and defines a free function taking the
+// payload by reference. Asserts the four relations the C++ extractor adds —
+// imports (#include), inherits (base class), references (signature/field types),
+// and defines (data members) — all resolve through the include with no dangling.
+int main() {
+  const auto root = fs::temp_directory_path() / "cgraph_cpp_extractor_test";
+  fs::remove_all(root);
+  fs::create_directories(root);
+
+  write_file(root / "include" / "types.hpp",
+             "#pragma once\n"
+             "struct Payload { int value; };\n"
+             "struct Base { virtual int run(); };\n");
+  write_file(root / "app.cpp",
+             "#include \"types.hpp\"\n"
+             "\n"
+             "struct Mixin {};\n"
+             "\n"
+             "class Service : public Base, public Mixin {\n"
+             "  Payload data;\n"
+             " public:\n"
+             "  int run() override { return data.value; }\n"
+             "};\n"
+             "\n"
+             "int handle(const Payload& p, Service& s) { return p.value; }\n");
+
+  const auto graph = cgraph::run_one_shot(root).graph;
+
+  int failures = 0;
+  const auto check = [&](bool ok, const char* what) {
+    if (!ok) {
+      std::fprintf(stderr, "FAIL: %s\n", what);
+      ++failures;
+    }
+  };
+
+  // imports: app.cpp -> types.hpp, resolved by include-suffix matching (the
+  // header lives under include/, not next to the .cpp).
+  check(has_edge_suffix(graph, "app.cpp", "include/types.hpp", "imports"), "import #include types.hpp");
+
+  // inherits: cross-file (Base, in the included header) and same-file (Mixin).
+  check(has_edge(graph, "Service", "Base", "inherits"), "inherits cross-file Base");
+  check(has_edge(graph, "Service", "Mixin", "inherits"), "inherits same-file Mixin");
+
+  // references: a free function's parameter type and a class data-member type,
+  // both resolved to the project type declared in the included header.
+  check(has_edge(graph, "handle(const Payload& p, Service& s)", "Payload", "references"),
+        "free-function parameter reference -> Payload");
+  check(has_edge(graph, "Service", "Payload", "references"), "field reference -> Payload");
+
+  // defines: a data member becomes a field node owned by its type.
+  check(has_node(graph, "data", "field"), "data member node");
+  check(has_edge(graph, "Service", "data", "defines"), "defines Service -> data");
+
+  // The header's std-free types resolve; nothing dangles.
+  for (const auto& edge : graph.edges) {
+    bool source_ok = false;
+    bool target_ok = false;
+    for (const auto& node : graph.nodes) {
+      source_ok = source_ok || node.id == edge.source;
+      target_ok = target_ok || node.id == edge.target;
+    }
+    check(source_ok && target_ok, "no dangling edge");
+  }
+
+  fs::remove_all(root);
+  return failures == 0 ? 0 : 1;
+}

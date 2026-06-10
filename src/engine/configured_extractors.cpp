@@ -1,5 +1,6 @@
 #include "cgraph/configured_extractors.hpp"
 
+#include "cgraph/cpp_extractor.hpp"
 #include "cgraph/javascript_extractor.hpp"
 #include "cgraph/non_grammar_extractors.hpp"
 #include "cgraph/python_extractor.hpp"
@@ -20,7 +21,7 @@ extern "C" const TSLanguage* tree_sitter_typescript();
 extern "C" const TSLanguage* tree_sitter_tsx();
 
 [[nodiscard]] LanguageConfig c_config() {
-  return LanguageConfig{
+  LanguageConfig config{
       .name = "c",
       .grammar_name = "tree-sitter-c",
       .extensions = {".c", ".h"},
@@ -32,6 +33,13 @@ extern "C" const TSLanguage* tree_sitter_tsx();
       .body_fields = {"body"},
       .call_accessor_fields = {"function"},
   };
+  // `#include` -> imports, struct members -> defines, member/param/return types
+  // -> references. cpp_relation_handler also emits inherits, which is a no-op for
+  // C (no base classes). Shared by the C and C++ configs.
+  config.import_handler = cpp_import_handler;
+  config.relation_handler = cpp_relation_handler;
+  config.extra_walk = cpp_field_walk;
+  return config;
 }
 
 [[nodiscard]] LanguageConfig cpp_config() {
