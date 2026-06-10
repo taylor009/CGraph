@@ -122,6 +122,41 @@ std::string export_graph_html(const GraphSnapshot& graph) {
     --function: #059669;
     --other: #7c3aed;
     --focus: #f59e0b;
+    /* Graph canvas colors are variables so light/dark theming flows through to
+       the canvas, which cannot inherit CSS the way DOM nodes do. */
+    --canvas-bg: #fbfcfd;
+    --graph-text: #111827;
+    --graph-edge: #9aa6b2;
+    --node-stroke: #ffffff;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d1117;
+    --panel: #161b22;
+    --ink: #e6edf3;
+    --muted: #8b949e;
+    --line: #30363d;
+    --edge: #3d444d;
+    --canvas-bg: #0d1117;
+    --graph-text: #e6edf3;
+    --graph-edge: #48505a;
+    --node-stroke: #0d1117;
+  }
+  /* Honor the OS preference on first load when the user has not chosen. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #161b22;
+      --ink: #e6edf3;
+      --muted: #8b949e;
+      --line: #30363d;
+      --edge: #3d444d;
+      --canvas-bg: #0d1117;
+      --graph-text: #e6edf3;
+      --graph-edge: #48505a;
+      --node-stroke: #0d1117;
+    }
   }
   * { box-sizing: border-box; }
   body {
@@ -170,7 +205,7 @@ std::string export_graph_html(const GraphSnapshot& graph) {
     height: 100%;
     min-height: 620px;
     display: block;
-    background: #fbfcfd;
+    background: var(--canvas-bg);
     cursor: grab;
   }
   #graph-canvas:active {
@@ -181,7 +216,7 @@ std::string export_graph_html(const GraphSnapshot& graph) {
     left: 14px;
     bottom: 12px;
     color: var(--muted);
-    background: rgba(255, 255, 255, 0.86);
+    background: var(--panel);
     border: 1px solid var(--line);
     border-radius: 6px;
     padding: 6px 8px;
@@ -195,7 +230,7 @@ std::string export_graph_html(const GraphSnapshot& graph) {
     flex-direction: column;
     gap: 6px;
     color: var(--muted);
-    background: rgba(255, 255, 255, 0.86);
+    background: var(--panel);
     border: 1px solid var(--line);
     border-radius: 6px;
     padding: 8px 10px;
@@ -211,6 +246,26 @@ std::string export_graph_html(const GraphSnapshot& graph) {
     height: 11px;
     border-radius: 50%;
     flex: none;
+  }
+  .controls {
+    position: absolute;
+    right: 14px;
+    top: 12px;
+    display: flex;
+    gap: 6px;
+  }
+  .control-btn {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .control-btn:hover {
+    background: var(--bg);
   }
   aside {
     min-height: 0;
@@ -304,7 +359,12 @@ std::string export_graph_html(const GraphSnapshot& graph) {
       <div class="row"><span class="dot" style="background:#2563eb"></span>Color = community</div>
       <div class="row"><span class="dot" style="background:#9aa6b2"></span>Bigger = more connected</div>
     </div>
-    <div class="hint">Drag a node to rearrange. Scroll to zoom, drag canvas to pan. Click a node for details.</div>
+    <div class="controls">
+      <button type="button" class="control-btn" id="fit-view">Fit to screen</button>
+      <button type="button" class="control-btn" id="reset-view">Reset view</button>
+      <button type="button" class="control-btn" id="theme-toggle" aria-pressed="false">Dark</button>
+    </div>
+    <div class="hint">Drag a node to rearrange. Scroll to zoom, drag canvas to pan. Click a node for details. Esc or click empty space to clear.</div>
   </section>
   <aside>
     <div class="tools">
@@ -325,6 +385,9 @@ const canvas = document.getElementById("graph-canvas");
 const ctx = canvas.getContext("2d");
 const search = document.getElementById("search");
 const details = document.getElementById("node-details");
+const fitButton = document.getElementById("fit-view");
+const resetButton = document.getElementById("reset-view");
+const themeToggle = document.getElementById("theme-toggle");
 const nodes = graphData.nodes.map((node, index) => ({...node, index}));
 const links = graphData.links || [];
 const nodeById = new Map(nodes.map(node => [node.id, node]));
@@ -335,8 +398,19 @@ const palette = {
   edge: "#9aa6b2",
   text: "#111827",
   muted: "#667085",
-  focus: "#f59e0b"
+  focus: "#f59e0b",
+  nodeStroke: "#ffffff"
 };
+
+// The canvas cannot inherit CSS, so pull the theme-dependent colors from the
+// document's CSS variables into the palette whenever the theme changes.
+function refreshTheme() {
+  const css = getComputedStyle(document.documentElement);
+  palette.text = (css.getPropertyValue("--graph-text").trim()) || palette.text;
+  palette.edge = (css.getPropertyValue("--graph-edge").trim()) || palette.edge;
+  palette.muted = (css.getPropertyValue("--muted").trim()) || palette.muted;
+  palette.nodeStroke = (css.getPropertyValue("--node-stroke").trim()) || palette.nodeStroke;
+}
 let selectedId = "";
 let hoverId = "";
 let searchTerm = "";
@@ -357,6 +431,31 @@ for (const link of links) {
   degree.set(link.source, (degree.get(link.source) || 0) + 1);
   degree.set(link.target, (degree.get(link.target) || 0) + 1);
 }
+
+// Group nodes by community so the layout can pull each cluster together and
+// seed members near a shared anchor. Communities are ordered deterministically
+// (by first appearance) so anchor placement is stable across loads.
+const communityOrder = [];
+const communityIndex = new Map();
+for (const node of nodes) {
+  const community = communityFor(node) || ("__node_" + node.id);
+  if (!communityIndex.has(community)) {
+    communityIndex.set(community, communityOrder.length);
+    communityOrder.push(community);
+  }
+  node.community = community;
+}
+
+// Bounded label budget: only the highest-degree nodes are labelled at rest, so
+// an overview of a large graph stays legible instead of becoming a wall of
+// text. Every other label is still reachable on hover/selection/search/zoom.
+const LABEL_BUDGET = 24;
+const labelBudget = new Set(
+  [...nodes]
+    .sort((a, b) => (degree.get(b.id) || 0) - (degree.get(a.id) || 0))
+    .slice(0, LABEL_BUDGET)
+    .map(node => node.id)
+);
 
 function radiusFor(node) {
   // Importance-weighted sizing: connected and "god" nodes read larger,
@@ -430,11 +529,21 @@ function layout() {
   const centerY = sim.height / 2;
   // Ideal edge length scales with available area per node.
   sim.k = Math.max(34, Math.sqrt((sim.width * sim.height) / Math.max(nodes.length, 1)));
-  // Seed nodes as a filled cloud across the frame so the simulation only has to
-  // relax spacing rather than explode outward or collapse inward.
+  // Seed each community around a ring so distinct clusters start in distinct
+  // regions; members land near their community anchor with seeded jitter. The
+  // centroid force in simulationTick then keeps them together while edges shape
+  // the interior. This makes the computed community structure spatially visible
+  // instead of relaxing into one uniform frame-filling cloud.
+  const communityCount = Math.max(communityOrder.length, 1);
+  const ringRadius = Math.min(sim.width, sim.height) * 0.38;
   for (const node of nodes) {
-    node.x = centerX + (seededUnit(node.index + 1) - 0.5) * sim.width * 0.72;
-    node.y = centerY + (seededUnit(node.index + 13) - 0.5) * sim.height * 0.72;
+    const slot = communityIndex.get(node.community) || 0;
+    const angle = (slot / communityCount) * 2 * Math.PI;
+    const anchorX = centerX + ringRadius * Math.cos(angle);
+    const anchorY = centerY + ringRadius * Math.sin(angle);
+    const spread = sim.k * 2.2;
+    node.x = anchorX + (seededUnit(node.index + 1) - 0.5) * spread;
+    node.y = anchorY + (seededUnit(node.index + 13) - 0.5) * spread;
   }
   sim.alpha = 1;
   layoutReady = true;
@@ -444,10 +553,11 @@ function simulationTick() {
   const k = sim.k;
   const centerX = sim.width / 2;
   const centerY = sim.height / 2;
-  // Repulsion acts only within a cutoff (like a charge distanceMax): interior
-  // nodes feel balanced forces and stay put, so the cloud fills the frame
-  // instead of stampeding to the walls.
-  const cutoff = k * 2.6;
+  // Repulsion acts within a wide cutoff so distinct communities genuinely push
+  // apart into separate regions, rather than the tight local cutoff that let
+  // the whole graph relax into one uniform blob. The cutoff stays finite so the
+  // per-tick cost is bounded (a future Barnes-Hut swap can drop it entirely).
+  const cutoff = k * 8;
   const cutoffSq = cutoff * cutoff;
   for (const node of nodes) { node.dx = 0; node.dy = 0; }
   for (let i = 0; i < nodes.length; ++i) {
@@ -485,11 +595,31 @@ function simulationTick() {
     source.dx += fx; source.dy += fy;
     target.dx -= fx; target.dy -= fy;
   }
-  // Moderate gravity centers the whole cloud and counters edge nodes' outward
-  // push, keeping the layout filling the interior.
+  // Community cohesion: pull each node toward its community's running centroid
+  // (communityCentroid) so clusters stay tight and read as distinct regions,
+  // making the computed community structure spatially visible.
+  const communityCentroid = new Map();
   for (const node of nodes) {
-    node.dx += (centerX - node.x) * 0.045;
-    node.dy += (centerY - node.y) * 0.045;
+    let acc = communityCentroid.get(node.community);
+    if (!acc) { acc = {x: 0, y: 0, count: 0}; communityCentroid.set(node.community, acc); }
+    acc.x += node.x; acc.y += node.y; acc.count += 1;
+  }
+  for (const acc of communityCentroid.values()) {
+    acc.x /= acc.count;
+    acc.y /= acc.count;
+  }
+  for (const node of nodes) {
+    const acc = communityCentroid.get(node.community);
+    if (acc) {
+      node.dx += (acc.x - node.x) * 0.12;
+      node.dy += (acc.y - node.y) * 0.12;
+    }
+  }
+  // Weak global gravity keeps the whole layout roughly centered without
+  // collapsing the separated communities back into one blob.
+  for (const node of nodes) {
+    node.dx += (centerX - node.x) * 0.015;
+    node.dy += (centerY - node.y) * 0.015;
   }
   // Move each node by its net displacement, limited by the cooling temperature.
   const maxStep = k * sim.alpha;
@@ -500,8 +630,10 @@ function simulationTick() {
     const step = Math.min(disp, maxStep);
     node.x += (node.dx / disp) * step;
     node.y += (node.dy / disp) * step;
-    node.x = Math.max(24, Math.min(sim.width - 24, node.x));
-    node.y = Math.max(24, Math.min(sim.height - 24, node.y));
+    // No hard wall clamp: nodes relax freely in open world space and stay
+    // bounded by gravity + community cohesion. Clamping to the viewport box
+    // pinned outward-pushed nodes into a dense rectangular border. Pan, zoom,
+    // and Fit to screen handle navigation instead.
   }
   sim.alpha *= 0.985;
 }
@@ -636,15 +768,21 @@ function draw() {
 
     ctx.beginPath();
     ctx.fillStyle = colorFor(node);
-    ctx.strokeStyle = selected ? palette.focus : "#ffffff";
+    ctx.strokeStyle = selected ? palette.focus : palette.nodeStroke;
     ctx.lineWidth = selected ? 4 / transform.scale : 2.5 / transform.scale;
     ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
     ctx.fill();
     ctx.stroke();
 
-    // Only label hub nodes by default (and anything active/searched) so the
-    // canvas does not turn into a wall of text.
-    const labelled = !dim && (r >= 9 || hovered || selected || (searchTerm && matchesSearch(node)));
+    // Label only the bounded top-by-degree budget at rest; reveal everything
+    // else progressively on hover, selection, active highlight, search match,
+    // or when zoomed in, so the overview stays legible but no label is ever
+    // permanently hidden.
+    const inHighlight = activeId && highlighted.has(node.id);
+    const zoomedIn = transform.scale >= 1.6;
+    const labelled = !dim && (
+      labelBudget.has(node.id) || hovered || selected || inHighlight ||
+      zoomedIn || (searchTerm && matchesSearch(node)));
     if (labelled) {
       ctx.fillStyle = palette.text;
       ctx.globalAlpha = dim ? 0.22 : 0.92;
@@ -656,15 +794,21 @@ function draw() {
 }
 
 let animationHandle = 0;
+// Auto-fit the whole graph into view once the initial layout settles, since
+// the unclamped layout spreads beyond the viewport. Cancelled the moment the
+// user pans, zooms, or selects, so we never yank a view they are using.
+let autoFitPending = true;
 function runSimulation() {
   if (animationHandle) cancelAnimationFrame(animationHandle);
   const tick = () => {
     // A few ticks per frame settle the layout quickly without a visible crawl.
     for (let i = 0; i < 2; ++i) simulationTick();
+    if (autoFitPending) fitToScreen();
     draw();
     if (sim.alpha > 0.02) {
       animationHandle = requestAnimationFrame(tick);
     } else {
+      if (autoFitPending) { fitToScreen(); autoFitPending = false; }
       animationHandle = 0;
     }
   };
@@ -715,7 +859,47 @@ function applySearch() {
   draw();
 }
 
+// Returning to the unfocused full graph without reloading: clear the selection
+// and highlight and restore the empty details panel.
+function clearSelection() {
+  selectedId = "";
+  hoverId = "";
+  details.innerHTML = '<p class="empty">Select a node to inspect its source, id, and neighbors.</p>';
+  draw();
+}
+
+// Reset view: clear selection and return the pan/zoom transform to identity.
+function resetView() {
+  transform = {x: 0, y: 0, scale: 1};
+  clearSelection();
+}
+
+// Fit to screen: center and scale the whole graph's bounding box into the
+// viewport, the recenter affordance the view otherwise lacks.
+function fitToScreen() {
+  if (!nodes.length) return;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const node of nodes) {
+    const r = radiusFor(node);
+    minX = Math.min(minX, node.x - r);
+    minY = Math.min(minY, node.y - r);
+    maxX = Math.max(maxX, node.x + r);
+    maxY = Math.max(maxY, node.y + r);
+  }
+  const box = canvas.getBoundingClientRect();
+  const margin = 40;
+  const spanX = Math.max(maxX - minX, 1);
+  const spanY = Math.max(maxY - minY, 1);
+  const scale = Math.max(0.25, Math.min(4,
+    Math.min((box.width - margin * 2) / spanX, (box.height - margin * 2) / spanY)));
+  transform.scale = scale;
+  transform.x = box.width / 2 - ((minX + maxX) / 2) * scale;
+  transform.y = box.height / 2 - ((minY + maxY) / 2) * scale;
+  draw();
+}
+
 canvas.addEventListener("pointerdown", event => {
+  autoFitPending = false;
   const node = hitNode(event);
   if (node) {
     selectNode(node.id);
@@ -728,6 +912,9 @@ canvas.addEventListener("pointerdown", event => {
     if (!animationHandle) runSimulation();
     return;
   }
+  // Empty-canvas press clears any active selection before starting a pan, so
+  // the user can always get back to the unfocused full graph.
+  if (selectedId) clearSelection();
   dragging = true;
   draggingNodeId = "";
   dragStart = {x: event.clientX, y: event.clientY, tx: transform.x, ty: transform.y};
@@ -770,6 +957,7 @@ canvas.addEventListener("pointerleave", () => {
 
 canvas.addEventListener("wheel", event => {
   event.preventDefault();
+  autoFitPending = false;
   const rect = canvas.getBoundingClientRect();
   const before = worldPoint(event.clientX - rect.left, event.clientY - rect.top);
   const factor = event.deltaY < 0 ? 1.12 : 0.89;
@@ -780,8 +968,40 @@ canvas.addEventListener("wheel", event => {
   draw();
 }, {passive: false});
 
+// Light/dark theme: an explicit data-theme attribute overrides the OS
+// preference once the user picks. The canvas palette is refreshed from CSS so
+// node/edge/label colors follow the theme.
+function effectiveDark() {
+  const attr = document.documentElement.getAttribute("data-theme");
+  if (attr) return attr === "dark";
+  return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+}
+function syncThemeButton() {
+  const dark = effectiveDark();
+  themeToggle.textContent = dark ? "Light" : "Dark";
+  themeToggle.setAttribute("aria-pressed", dark ? "true" : "false");
+}
+function toggleTheme() {
+  document.documentElement.setAttribute("data-theme", effectiveDark() ? "light" : "dark");
+  refreshTheme();
+  syncThemeButton();
+  draw();
+}
+themeToggle.addEventListener("click", toggleTheme);
+
 search.addEventListener("input", applySearch);
+fitButton.addEventListener("click", fitToScreen);
+resetButton.addEventListener("click", resetView);
+// Escape clears the current selection and highlight, returning to the full
+// graph without a reload.
+window.addEventListener("keydown", event => {
+  if (event.key === "Escape") {
+    clearSelection();
+  }
+});
 window.addEventListener("resize", render);
+refreshTheme();
+syncThemeButton();
 render();
 </script>
 </body>
