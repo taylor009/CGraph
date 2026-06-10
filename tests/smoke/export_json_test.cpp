@@ -63,6 +63,12 @@ int main() {
     return 1;
   }
 
+  // Legend is a dynamic per-community color key, not two hardcoded rows.
+  if (html.find("buildLegend(") == std::string::npos ||
+      html.find("id=\"legend\"") == std::string::npos) {
+    return 1;
+  }
+
   // Layout is community-aware and deterministic: a community-centroid force
   // pulls clusters together, and no Math.random is used (task group 3).
   if (html.find("communityCentroid") == std::string::npos ||

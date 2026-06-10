@@ -235,11 +235,35 @@ std::string export_graph_html(const GraphSnapshot& graph) {
     border-radius: 6px;
     padding: 8px 10px;
     font-size: 12px;
+    max-height: 46vh;
+    overflow-y: auto;
   }
   .legend .row {
     display: flex;
     align-items: center;
     gap: 7px;
+  }
+  .legend .head {
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 2px;
+  }
+  .legend .lbl {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 168px;
+  }
+  .legend .count {
+    margin-left: auto;
+    padding-left: 10px;
+    opacity: 0.6;
+    font-variant-numeric: tabular-nums;
+  }
+  .legend .foot {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--line);
   }
   .legend .dot {
     width: 11px;
@@ -355,10 +379,7 @@ std::string export_graph_html(const GraphSnapshot& graph) {
 <main>
   <section class="stage" aria-label="Graph visualization">
     <canvas id="graph-canvas" aria-label="Interactive graph visualization"></canvas>
-    <div class="legend">
-      <div class="row"><span class="dot" style="background:#2563eb"></span>Color = community</div>
-      <div class="row"><span class="dot" style="background:#9aa6b2"></span>Bigger = more connected</div>
-    </div>
+    <div class="legend" id="legend" aria-label="Community color key"></div>
     <div class="controls">
       <button type="button" class="control-btn" id="fit-view">Fit to screen</button>
       <button type="button" class="control-btn" id="reset-view">Reset view</button>
@@ -859,6 +880,42 @@ function applySearch() {
   draw();
 }
 
+// Build the legend as a live color key: one row per detected community (its
+// actual swatch color, a representative label, and node count), ordered by
+// size, plus the size hint. Clicking a row focuses that community's hub.
+function buildLegend() {
+  const legend = document.getElementById("legend");
+  if (!legend) return;
+  const groups = new Map();
+  for (const node of nodes) {
+    const community = communityFor(node);
+    if (!community) continue;
+    let group = groups.get(community);
+    if (!group) { group = {count: 0, rep: node}; groups.set(community, group); }
+    group.count += 1;
+    if ((degree.get(node.id) || 0) > (degree.get(group.rep.id) || 0)) group.rep = node;
+  }
+  const ordered = [...groups.values()].sort((a, b) => b.count - a.count);
+  let html = '<div class="row head">Communities (' + ordered.length + ')</div>';
+  for (const group of ordered) {
+    const rep = group.rep;
+    html += '<div class="row legend-item" data-node="' + escapeHtml(rep.id) + '" title="' +
+      escapeHtml(rep.label || rep.id) + '">' +
+      '<span class="dot" style="background:' + colorFor(rep) + '"></span>' +
+      '<span class="lbl">' + escapeHtml(shortLabel(rep.label || rep.id)) + '</span>' +
+      '<span class="count">' + group.count + '</span></div>';
+  }
+  html += '<div class="row foot"><span class="dot" style="background:var(--edge)"></span>Bigger = more connected</div>';
+  legend.innerHTML = html;
+  for (const item of legend.querySelectorAll(".legend-item")) {
+    item.style.cursor = "pointer";
+    item.addEventListener("click", () => {
+      autoFitPending = false;
+      selectNode(item.getAttribute("data-node"));
+    });
+  }
+}
+
 // Returning to the unfocused full graph without reloading: clear the selection
 // and highlight and restore the empty details panel.
 function clearSelection() {
@@ -1002,6 +1059,7 @@ window.addEventListener("keydown", event => {
 window.addEventListener("resize", render);
 refreshTheme();
 syncThemeButton();
+buildLegend();
 render();
 </script>
 </body>
