@@ -1,5 +1,7 @@
 #include "cgraph/semantic_orchestration.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -74,20 +76,53 @@ int main() {
     return 1;
   }
 
-  // Re-plan: the now-cached doc is skipped (cache hit, no chunks).
+  // Second pass: add another doc. The cached doc is skipped; the new doc is a
+  // fresh chunk. Crucially, its fragment name must be OFFSET past the already
+  // dropped chunk_00.json, so a second pass cannot overwrite the first pass's
+  // fragment — the drop directory accumulates and ingest stays additive.
+  write_file(root / "docs" / "architecture.md", "# Architecture\nThe daemon serves queries.\n");
   const auto replan = cgraph::plan_enrichment(root, drop);
-  if (!replan.plan.chunks.empty() || replan.plan.cache_hits != 1) {
+  if (replan.plan.chunks.size() != 1 || replan.plan.cache_hits != 1) {
+    return 1;  // overview cached, architecture pending
+  }
+  {
+    std::ifstream manifest_file(replan.manifest_path, std::ios::binary);
+    const auto manifest = nlohmann::json::parse(manifest_file, nullptr, false);
+    const auto fragment_name = manifest["chunks"][0].value("fragment", std::string{});
+    if (fragment_name != cgraph::fragment_filename_for_chunk(1)) {
+      return 1;  // offset applied: chunk_01.json, not a colliding chunk_00.json
+    }
+  }
+  write_file(drop / cgraph::fragment_filename_for_chunk(1), R"({
+    "nodes": [
+      {"id": "doc:arch", "label": "ArchDoc", "type": "document"},
+      {"id": "concept:daemon", "label": "DaemonConcept", "type": "concept"}
+    ],
+    "edges": [{"source": "doc:arch", "target": "concept:daemon", "relation": "DESCRIBES"}]
+  })");
+
+  // Ingest re-applies BOTH fragments: the first pass's nodes are NOT lost.
+  const auto ingest2 = cgraph::ingest_enrichment(root, drop);
+  if (ingest2.fragments_ingested != 2 || ingest2.fragments_rejected != 0) {
+    return 1;
+  }
+  if (!has_label(ingest2.graph, "Overview") || !has_label(ingest2.graph, "Pipeline") ||
+      !has_label(ingest2.graph, "ArchDoc") || !has_label(ingest2.graph, "DaemonConcept")) {
+    return 1;  // both passes coexist
+  }
+  if (ingest2.graph.nodes.size() != ingest2.deterministic_nodes + 4) {
     return 1;
   }
 
-  // A malformed fragment is rejected and leaves the graph unchanged.
-  write_file(drop / cgraph::fragment_filename_for_chunk(0), R"({"nodes":[{"id":"no-label"}],"edges":[]})");
+  // A malformed fragment dropped as a new file is rejected and leaves the graph
+  // unchanged; the two valid fragments still merge.
+  write_file(drop / cgraph::fragment_filename_for_chunk(2), R"({"nodes":[{"id":"no-label"}],"edges":[]})");
   const auto bad = cgraph::ingest_enrichment(root, drop);
-  if (bad.fragments_rejected != 1 || bad.fragments_ingested != 0 || bad.errors.empty()) {
+  if (bad.fragments_rejected != 1 || bad.fragments_ingested != 2 || bad.errors.empty()) {
     return 1;
   }
-  if (bad.graph.nodes.size() != bad.deterministic_nodes) {
-    return 1;  // rejected fragment must not mutate the graph
+  if (bad.graph.nodes.size() != bad.deterministic_nodes + 4) {
+    return 1;  // rejected fragment adds nothing; the valid ones persist
   }
 
   fs::remove_all(root);

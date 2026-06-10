@@ -74,6 +74,15 @@ EnrichmentPlanResult plan_enrichment(const std::filesystem::path& root, const st
   }
   result.plan = plan_semantic_chunks(root, cache, options);
 
+  // Fragment filenames are derived from a chunk index. The plan re-numbers from
+  // zero every pass (only uncached chunks appear), so naming files by the
+  // plan-relative index would reuse chunk_00.json across passes and overwrite an
+  // earlier pass's fragment — silently dropping its nodes from the graph on the
+  // next rebuild, even though the cache still marks the sources enriched. Offset
+  // new fragment names past the fragments already dropped so the drop directory
+  // accumulates across passes and ingest stays additive.
+  const auto fragment_offset = discover_semantic_fragment_drops(drop_dir).size();
+
   // Manifest: enough for a host to know what to enrich and where to drop each
   // resulting fragment.
   nlohmann::json manifest;
@@ -81,6 +90,7 @@ EnrichmentPlanResult plan_enrichment(const std::filesystem::path& root, const st
   manifest["stale_inputs"] = result.plan.stale_inputs;
   manifest["chunks"] = nlohmann::json::array();
   for (const auto& chunk : result.plan.chunks) {
+    const auto fragment_index = fragment_offset + chunk.index;
     nlohmann::json inputs = nlohmann::json::array();
     for (const auto& input : chunk.inputs) {
       inputs.push_back({
@@ -92,8 +102,8 @@ EnrichmentPlanResult plan_enrichment(const std::filesystem::path& root, const st
       ++result.inputs_to_enrich;
     }
     manifest["chunks"].push_back({
-        {"index", chunk.index},
-        {"fragment", fragment_filename_for_chunk(chunk.index)},
+        {"index", fragment_index},
+        {"fragment", fragment_filename_for_chunk(fragment_index)},
         {"inputs", std::move(inputs)},
     });
   }
