@@ -161,7 +161,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   // the single-writer path, and surfaces progress via the enrichment_* status
   // fields. Source attribution for each fragment comes from the plan manifest.
   const auto drop_dir = options.drop_dir.empty()
-                            ? default_semantic_drop_dir(identity.project_root / "graphify-out")
+                            ? default_semantic_drop_dir(identity.project_root / "cgraph-out")
                             : options.drop_dir;
   const auto cache_path = drop_dir / "semantic-cache.json";
   SemanticCache cache = read_semantic_cache(cache_path);

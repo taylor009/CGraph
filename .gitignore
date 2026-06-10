@@ -6,6 +6,7 @@
 vcpkg_installed/
 
 # Generated graph exports
+/cgraph-out/
 /graphify-out/
 *-source-graph/
 

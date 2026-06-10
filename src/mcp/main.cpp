@@ -8,7 +8,13 @@
 
 int main(int argc, char** argv) {
   cgraph::ClientRequest base;
-  base.project_root = std::filesystem::current_path();
+  // Claude Code (and other hosts) set CLAUDE_PROJECT_DIR to the project root and
+  // do not guarantee the server's working directory, so prefer it over cwd.
+  if (const auto* project = std::getenv("CLAUDE_PROJECT_DIR"); project != nullptr && project[0] != '\0') {
+    base.project_root = project;
+  } else {
+    base.project_root = std::filesystem::current_path();
+  }
   if (const auto* env = std::getenv("CGRAPH_DAEMON_PATH"); env != nullptr && env[0] != '\0') {
     base.daemon_path = env;
   }

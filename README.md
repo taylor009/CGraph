@@ -26,7 +26,7 @@ flow. Build it from source with CMake and vcpkg.
 
 - Deterministic project scanning with root `.gitignore` support and built-in
   skips for generated or dependency directories such as `build`, `dist`,
-  `node_modules`, `target`, `vendor`, and `graphify-out`.
+  `node_modules`, `target`, `vendor`, and `cgraph-out`.
 - Tree-sitter-backed extraction for C, C++, Groovy, Java, JavaScript, Kotlin,
   Python, Ruby, Scala, TypeScript, and TSX.
 - Regex or structured extraction for Apex, Delphi form/source files, MSBuild/XML
@@ -130,22 +130,22 @@ ctest --preset fuzzers
 Build a graph for the current repository:
 
 ```sh
-build/default/src/cli/cgraph --root . --out graphify-out
+build/default/src/cli/cgraph --root . --out cgraph-out
 ```
 
 The command writes:
 
 ```text
-graphify-out/graph.json
-graphify-out/graph.html
-graphify-out/graph.svg
-graphify-out/obsidian.md
-graphify-out/cypher.txt
-graphify-out/call-flow.html
+cgraph-out/graph.json
+cgraph-out/graph.html
+cgraph-out/graph.svg
+cgraph-out/obsidian.md
+cgraph-out/cypher.txt
+cgraph-out/call-flow.html
 ```
 
-Open `graphify-out/graph.html` in a browser for an interactive local graph
-view, or consume `graphify-out/graph.json` from other tools.
+Open `cgraph-out/graph.html` in a browser for an interactive local graph
+view, or consume `cgraph-out/graph.json` from other tools.
 
 ## CLI
 
@@ -158,7 +158,7 @@ cgraph enrich-ingest [--root PATH] [--out PATH] [--drop DIR]
 Defaults:
 
 - `--root .`
-- `--out graphify-out`
+- `--out cgraph-out`
 - `--drop` defaults to CGraph's semantic drop directory under the output path
 
 Examples:
@@ -270,7 +270,7 @@ Semantic enrichment is a host-driven workflow:
 5. Valid fragments update the graph and semantic cache; malformed fragments are
    rejected without changing the graph snapshot.
 
-Fragments use a Graphify-compatible shape:
+Fragments use this node-link shape:
 
 ```json
 {

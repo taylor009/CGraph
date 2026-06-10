@@ -73,7 +73,7 @@ int main() {
   // Semantic enrichment: drop a valid fragment into the daemon's drop dir and
   // the watcher must merge it into the live snapshot (no update op issued).
   const auto nodes_pre_enrich = nodes_after;
-  write_file(root / "graphify-out" / "semantic-drop" / "chunk_00.json", R"({
+  write_file(root / "cgraph-out" / "semantic-drop" / "chunk_00.json", R"({
     "nodes": [
       {"id": "doc:guide", "label": "Guide", "type": "document"},
       {"id": "concept:topic", "label": "Topic", "type": "concept"}
@@ -93,7 +93,7 @@ int main() {
   ok = ok && topic && !(*topic)["result"]["nodes"].empty();
 
   // A malformed fragment is rejected: enrichment_state goes failed, graph unchanged.
-  write_file(root / "graphify-out" / "semantic-drop" / "chunk_01.json", R"({"nodes":[{"id":"x"}],"edges":[]})");
+  write_file(root / "cgraph-out" / "semantic-drop" / "chunk_01.json", R"({"nodes":[{"id":"x"}],"edges":[]})");
   bool failed_seen = false;
   int nodes_at_fail = 0;
   for (int attempt = 0; attempt < 200 && !failed_seen; ++attempt) {

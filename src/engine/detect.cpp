@@ -50,6 +50,7 @@ namespace {
       "node_modules",
       "target",
       "vendor",
+      "cgraph-out",
       "graphify-out",
   };
   return skipped.contains(name);

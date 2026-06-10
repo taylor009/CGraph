@@ -32,7 +32,7 @@ Hosts dispatch each chunk to their own agent or model workflow. A completed chun
 
 ## Semantic Fragment Schema
 
-Dropped fragments must use the Graphify-compatible fragment shape:
+Dropped fragments must use the node-link fragment shape:
 
 - `nodes`: array of node objects with required `id` and `label`
 - `edges`: array of edge objects with required `source`, `target`, and `relation`

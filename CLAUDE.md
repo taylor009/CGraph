@@ -32,7 +32,7 @@ ASan/UBSan, `build/fuzzers`, requires `CGRAPH_BUILD_FUZZERS=ON`). System deps vi
 
 Built binaries land in `build/default/src/<target>/`:
 
-- `cgraph` (cli) — one-shot: `cgraph --root PATH --out graphify-out` builds the graph and writes all exports.
+- `cgraph` (cli) — one-shot: `cgraph --root PATH --out cgraph-out` builds the graph and writes all exports.
 - `graphd` (daemon) — resident per-project server; also `--benchmark-query --graph PATH --query TEXT`.
 - `cgraph-client` (client) — thin client: `cgraph-client --root PATH <query|path|explain|update|status|shutdown> [JSON params]`.
 - `cgraph-mcp` (mcp) — MCP server (stdio JSON-RPC) fronting the daemon ops.

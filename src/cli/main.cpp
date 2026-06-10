@@ -20,7 +20,7 @@ void print_usage() {
 
 struct Args {
   std::filesystem::path root = ".";
-  std::filesystem::path output = "graphify-out";
+  std::filesystem::path output = "cgraph-out";
   std::filesystem::path drop;  // empty -> default_semantic_drop_dir(output)
 };
 
