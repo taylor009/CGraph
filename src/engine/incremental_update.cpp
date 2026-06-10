@@ -46,12 +46,20 @@ namespace {
   resolve_imports(graph, index.aliases);
   resolve_raw_calls(graph, raw_calls);
   resolve_raw_relations(graph, raw_relations);
-  // Run the same community + centrality analysis the one-shot pipeline does, so
-  // the resident daemon's graph carries degree_centrality / god_node / community
-  // — required for ranked query results and importance-aware blast radius.
-  detect_communities(graph);
-  analyze_graph(graph);
   return graph;
+}
+
+// Community + centrality analysis, run AFTER dedup — exactly the order
+// run_one_shot uses (merge -> resolve -> dedup -> communities -> analyze). Doing
+// it here rather than inside rebuild_graph matters for two reasons:
+//   * correctness/parity: dedup must see no community property, or it buckets
+//     every node of a community together and runs O(k^2) fuzzy comparisons
+//     within it (a ~60s cliff on a large repo); running before communities keeps
+//     the daemon graph identical to the canonical one-shot graph.
+//   * centrality is computed on the final, deduped node set, not a stale one.
+void finalize_graph(GraphSnapshot& graph) {
+  (void)detect_communities(graph);
+  analyze_graph(graph);
 }
 
 }  // namespace
@@ -95,6 +103,7 @@ IncrementalUpdateResult full_stat_index_rescan(
 
   auto graph = rebuild_graph(index);
   semantic_dedup(graph, dedup_policy.options);
+  finalize_graph(graph);  // communities + centrality on the deduped graph
   result.full_dedup_reconciled = true;
   publish_graph_snapshot(state, std::move(graph));
   return result;
@@ -175,6 +184,7 @@ IncrementalUpdateResult apply_incremental_code_updates(
     result.full_dedup_reconciled = true;
     index.updates_since_full_dedup = 0;
   }
+  finalize_graph(graph);  // communities + centrality after dedup (matches run_one_shot order)
   publish_graph_snapshot(state, std::move(graph));
   return result;
 }

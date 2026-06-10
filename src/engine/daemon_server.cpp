@@ -268,8 +268,11 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     const std::scoped_lock lock(graph_mutex);
     const auto result = full_stat_index_rescan(state, index, identity.project_root);
     ingest_all_drops();
-    refresh_enrichment_state();
+    // Persist as soon as the graph is final (post semantic overlay) and before
+    // enrichment planning, which walks the whole project and can take seconds on
+    // a large repo. The Tier-1 cache should land promptly, not behind planning.
     persist_graph_and_manifest();
+    refresh_enrichment_state();
     const auto graph = read_graph_snapshot(state);
     return nlohmann::json{
         {"accepted", true},
@@ -299,8 +302,10 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
       return false;
     }
     ingest_all_drops();
-    refresh_enrichment_state();
+    // Log the fast-path load immediately — before enrichment planning, which
+    // walks the whole project and can take seconds.
     std::cerr << "graphd: loaded persisted graph (" << detected.size() << " files unchanged)\n";
+    refresh_enrichment_state();
     return true;
   };
   state.update_handler = [&](const nlohmann::json&) { return rescan(); };

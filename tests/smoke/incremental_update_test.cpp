@@ -113,9 +113,30 @@ int main() {
     return 1;
   }
 
+  // The daemon's rescan must produce the same graph as the canonical one-shot
+  // pipeline: identical labels AND identical node/edge counts. The count check
+  // guards the pipeline ordering — the daemon must dedup before community
+  // detection just like run_one_shot, or community-bucketed dedup over-merges
+  // and the counts diverge.
   const auto full_build = cgraph::run_one_shot(root);
   graph = cgraph::read_graph_snapshot(state);
   if (node_labels(*graph) != node_labels(full_build.graph)) {
+    return 1;
+  }
+  if (graph->nodes.size() != full_build.graph.nodes.size() ||
+      graph->edges.size() != full_build.graph.edges.size()) {
+    return 1;
+  }
+  // The daemon graph carries community + centrality (computed after dedup), so
+  // ranked queries work on the resident snapshot.
+  bool has_centrality = false;
+  for (const auto& node : graph->nodes) {
+    if (node.properties.contains("degree_centrality")) {
+      has_centrality = true;
+      break;
+    }
+  }
+  if (!has_centrality) {
     return 1;
   }
 
