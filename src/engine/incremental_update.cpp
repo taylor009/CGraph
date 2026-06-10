@@ -70,11 +70,14 @@ IncrementalUpdateResult full_stat_index_rescan(
   rescanned.reserve(detected_files.size());
   rescanned_cache.reserve(detected_files.size());
 
-  for (const auto& file : detected_files) {
-    auto extraction = extract_detected_file(file);
+  // Extract all files concurrently; the index maps are keyed by file and
+  // rebuild_graph re-sorts keys, so result order does not affect the graph.
+  auto extractions = extract_files(detected_files);
+  for (std::size_t i = 0; i < detected_files.size(); ++i) {
+    auto& extraction = extractions[i];
     result.warnings.insert(result.warnings.end(), extraction.fragment.warnings.begin(), extraction.fragment.warnings.end());
-    const auto key = key_for(file.path);
-    rescanned_cache.emplace(key, read_file_cache_entry(file.path));
+    const auto key = key_for(detected_files[i].path);
+    rescanned_cache.emplace(key, read_file_cache_entry(detected_files[i].path));
     rescanned.emplace(key, std::move(extraction));
     ++result.files_reextracted;
   }

@@ -31,8 +31,10 @@ PipelineResult run_one_shot(const std::filesystem::path& root) {
   std::vector<RawRelation> raw_relations;
   fragments.reserve(files.size());
 
-  for (const auto& file : files) {
-    auto extraction = extract_detected_file(file);
+  // Extract concurrently; the results come back in detection order, so merging
+  // them below is identical to the serial path (parity preserved).
+  auto extractions = extract_files(files);
+  for (auto& extraction : extractions) {
     result.warnings.insert(result.warnings.end(), extraction.fragment.warnings.begin(), extraction.fragment.warnings.end());
     raw_calls.insert(raw_calls.end(), extraction.raw_calls.begin(), extraction.raw_calls.end());
     raw_relations.insert(raw_relations.end(), extraction.raw_relations.begin(), extraction.raw_relations.end());

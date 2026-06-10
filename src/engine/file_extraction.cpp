@@ -2,11 +2,14 @@
 
 #include "cgraph/configured_extractors.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 
 namespace cgraph {
 namespace {
@@ -71,6 +74,46 @@ ExtractionResult extract_detected_file(const DetectedFile& file) {
   }
 
   return empty;
+}
+
+std::vector<ExtractionResult> extract_files(std::span<const DetectedFile> files) {
+  std::vector<ExtractionResult> results(files.size());
+  if (files.empty()) {
+    return results;
+  }
+
+  // One worker per core, never more than there are files. Each thread pulls the
+  // next unclaimed index and writes its own slot, so there is no write
+  // contention and the output order matches the input regardless of timing.
+  const unsigned hardware = std::thread::hardware_concurrency();
+  const std::size_t worker_count =
+      std::min<std::size_t>(hardware == 0 ? 1 : hardware, files.size());
+
+  if (worker_count <= 1) {
+    for (std::size_t i = 0; i < files.size(); ++i) {
+      results[i] = extract_detected_file(files[i]);
+    }
+    return results;
+  }
+
+  std::atomic<std::size_t> next{0};
+  const auto worker = [&] {
+    for (std::size_t i = next.fetch_add(1, std::memory_order_relaxed); i < files.size();
+         i = next.fetch_add(1, std::memory_order_relaxed)) {
+      results[i] = extract_detected_file(files[i]);
+    }
+  };
+
+  std::vector<std::thread> workers;
+  workers.reserve(worker_count - 1);
+  for (std::size_t i = 0; i < worker_count - 1; ++i) {
+    workers.emplace_back(worker);
+  }
+  worker();  // the calling thread participates too
+  for (auto& thread : workers) {
+    thread.join();
+  }
+  return results;
 }
 
 }  // namespace cgraph
