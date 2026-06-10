@@ -19,7 +19,9 @@
 #include <array>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifndef _WIN32
@@ -156,6 +158,18 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   DaemonState state;
   state.pid = ::getpid();
 
+  // Serve immediately. Publish an empty graph so status/query answer right away
+  // (build_state Empty, node_count 0) while the initial build runs on a worker
+  // thread — otherwise a large repo's multi-minute cold build blocks every
+  // connection, including a trivial `status`, until it finishes.
+  publish_graph_snapshot(state, GraphSnapshot{});
+
+  // Serializes graph-mutating work (the initial build, `update` rescans, and
+  // live fragment ingestion) so the build thread and the serve loop never race
+  // on the file index or semantic cache. Read-only ops (status/query/explain/
+  // path/context) take only the snapshot lock and stay responsive during a build.
+  std::mutex graph_mutex;
+
   // Semantic enrichment: the daemon watches a drop directory for host-computed
   // chunk_NN.json fragments, merges valid ones into the live snapshot through
   // the single-writer path, and surfaces progress via the enrichment_* status
@@ -224,6 +238,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   // op dispatch stays in handle_daemon_request.
   IncrementalGraphIndex index;
   const auto rescan = [&]() {
+    const std::scoped_lock lock(graph_mutex);
     const auto result = full_stat_index_rescan(state, index, identity.project_root);
     ingest_all_drops();
     refresh_enrichment_state();
@@ -239,8 +254,12 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   };
   state.update_handler = [&](const nlohmann::json&) { return rescan(); };
 
+  // Build on a worker thread so the accept loop below starts serving at once.
+  // rescan() locks graph_mutex; status/query answer from the empty snapshot until
+  // the build publishes the real one.
+  std::thread build_thread;
   if (options.build_graph_on_start) {
-    (void)rescan();
+    build_thread = std::thread([&] { (void)rescan(); });
   }
   drop_watcher.poll(FileWatcherClock::now());  // prime: existing drops are already overlaid
 
@@ -268,6 +287,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
 
     // Ingest any debounced fragment drops discovered since the last tick.
     if (const auto events = drop_watcher.poll(FileWatcherClock::now()); !events.empty()) {
+      const std::scoped_lock lock(graph_mutex);  // serialize with the build/rescan thread
       const auto sources = load_chunk_sources(drop_dir);
       bool merged_any = false;
       for (const auto& event : events) {
@@ -306,6 +326,9 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     ::close(conn);
   }
 
+  if (build_thread.joinable()) {
+    build_thread.join();  // captures locals by reference: join before they leave scope
+  }
   ::close(listen_fd);
   (void)cleanup_daemon_endpoint(socket_path);
   return 0;

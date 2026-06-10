@@ -53,10 +53,18 @@ int main() {
 
   bool ok = true;
 
-  // Status round-trips and reports the baseline graph (file + function node).
-  const auto status = request_with_retry(socket_path, cgraph::make_request("status"));
-  ok = ok && status && (*status)["ok"] == true;
-  const auto nodes_before = status ? (*status)["result"].value("node_count", 0) : 0;
+  // Status round-trips immediately (the daemon serves while building on a worker
+  // thread), so poll until the initial build publishes the baseline graph
+  // (file + function node) rather than assuming it is ready on the first reply.
+  int nodes_before = 0;
+  for (int attempt = 0; attempt < 200 && nodes_before < 2; ++attempt) {
+    const auto status = request_with_retry(socket_path, cgraph::make_request("status"));
+    ok = ok && status && (*status)["ok"] == true;
+    nodes_before = status ? (*status)["result"].value("node_count", 0) : 0;
+    if (nodes_before < 2) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
   ok = ok && nodes_before >= 2;
 
   // Add a new source file, then `update .` must rescan and grow the graph.
