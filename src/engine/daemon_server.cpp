@@ -5,6 +5,7 @@
 #include "cgraph/daemon_lifecycle.hpp"
 #include "cgraph/daemon_ops.hpp"
 #include "cgraph/incremental_update.hpp"
+#include "cgraph/index_persistence.hpp"
 #include "cgraph/protocol.hpp"
 #include "cgraph/semantic_cache.hpp"
 #include "cgraph/semantic_chunk_plan.hpp"
@@ -236,12 +237,39 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   // semantic fragments, so `update .` keeps the resident snapshot current
   // without discarding enrichment. Wired through the injectable handler so all
   // op dispatch stays in handle_daemon_request.
+  // Persisted artifacts under the project output dir. After every full rescan we
+  // write graph.json plus a version-stamped manifest of the file set it was built
+  // from, so a later restart with an unchanged tree can serve straight from disk.
+  const auto out_dir = identity.project_root / "cgraph-out";
+  const auto graph_path = out_dir / "graph.json";
+  const auto manifest_path = out_dir / "index-manifest.json";
+
   IncrementalGraphIndex index;
+
+  // Writes graph.json + the file manifest atomically. Logged, never fatal: a
+  // failed persist only means the next restart rebuilds rather than fast-loads.
+  const auto persist_graph_and_manifest = [&]() {
+    if (!persist_graph_snapshot(state, graph_path)) {
+      std::cerr << "graphd: failed to persist " << graph_path << '\n';
+      return;
+    }
+    IndexManifest manifest;
+    manifest.version_key = index_version_key();
+    manifest.files.reserve(index.cache.size());
+    for (const auto& [_, entry] : index.cache) {
+      manifest.files.push_back(entry);
+    }
+    if (!write_index_manifest(manifest, manifest_path)) {
+      std::cerr << "graphd: failed to persist " << manifest_path << '\n';
+    }
+  };
+
   const auto rescan = [&]() {
     const std::scoped_lock lock(graph_mutex);
     const auto result = full_stat_index_rescan(state, index, identity.project_root);
     ingest_all_drops();
     refresh_enrichment_state();
+    persist_graph_and_manifest();
     const auto graph = read_graph_snapshot(state);
     return nlohmann::json{
         {"accepted", true},
@@ -252,6 +280,29 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
         {"edge_count", graph->edges.size()},
     };
   };
+
+  // Tier-1 fast path: if the persisted manifest's version key still matches this
+  // binary and every detected file is a stat/hash hit against it (no files added
+  // or removed), load the persisted graph and overlay semantic drops instead of
+  // re-extracting. Returns false (rebuild needed) on any miss.
+  const auto try_load_persisted = [&]() -> bool {
+    const auto manifest = read_index_manifest(manifest_path);
+    if (!manifest || manifest->version_key != index_version_key()) {
+      return false;
+    }
+    const auto detected = detect_project_files(identity.project_root);
+    if (!tree_matches_manifest(*manifest, detected)) {
+      return false;
+    }
+    const std::scoped_lock lock(graph_mutex);
+    if (!load_graph_snapshot(state, graph_path)) {
+      return false;
+    }
+    ingest_all_drops();
+    refresh_enrichment_state();
+    std::cerr << "graphd: loaded persisted graph (" << detected.size() << " files unchanged)\n";
+    return true;
+  };
   state.update_handler = [&](const nlohmann::json&) { return rescan(); };
 
   // Build on a worker thread so the accept loop below starts serving at once.
@@ -259,9 +310,13 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   // the build publishes the real one.
   std::thread build_thread;
   if (options.build_graph_on_start) {
-    build_thread = std::thread([&] { (void)rescan(); });
+    build_thread = std::thread([&] {
+      if (!try_load_persisted()) {
+        (void)rescan();
+      }
+    });
   }
-  drop_watcher.poll(FileWatcherClock::now());  // prime: existing drops are already overlaid
+  (void)drop_watcher.poll(FileWatcherClock::now());  // prime: existing drops are already overlaid
 
   std::cerr << "graphd listening on " << socket_path << " for root " << identity.project_root << '\n';
 

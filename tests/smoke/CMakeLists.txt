@@ -202,6 +202,18 @@ cgraph_enable_sanitizers(cgraph_file_cache_test)
 
 add_test(NAME cgraph_file_cache_test COMMAND cgraph_file_cache_test)
 
+add_executable(cgraph_index_persistence_test
+  index_persistence_test.cpp)
+
+target_link_libraries(cgraph_index_persistence_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_index_persistence_test)
+cgraph_enable_sanitizers(cgraph_index_persistence_test)
+
+add_test(NAME cgraph_index_persistence_test COMMAND cgraph_index_persistence_test)
+
 add_executable(cgraph_semantic_cache_test
   semantic_cache_test.cpp)
 
@@ -427,6 +439,18 @@ cgraph_set_warnings(cgraph_daemon_server_test)
 cgraph_enable_sanitizers(cgraph_daemon_server_test)
 
 add_test(NAME cgraph_daemon_server_test COMMAND cgraph_daemon_server_test)
+
+add_executable(cgraph_daemon_persistence_test
+  daemon_persistence_test.cpp)
+
+target_link_libraries(cgraph_daemon_persistence_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_daemon_persistence_test)
+cgraph_enable_sanitizers(cgraph_daemon_persistence_test)
+
+add_test(NAME cgraph_daemon_persistence_test COMMAND cgraph_daemon_persistence_test)
 
 add_executable(cgraph_dedup_test
   dedup_test.cpp)

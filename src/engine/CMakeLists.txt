@@ -19,6 +19,7 @@ add_library(cgraph_engine STATIC
   fragment_json.cpp
   graph_builder.cpp
   incremental_update.cpp
+  index_persistence.cpp
   javascript_extractor.cpp
   language_config.cpp
   non_grammar_extractors.cpp
