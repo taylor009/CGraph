@@ -4,7 +4,7 @@
 #include "cgraph/daemon_identity.hpp"
 #include "cgraph/daemon_lifecycle.hpp"
 #include "cgraph/daemon_ops.hpp"
-#include "cgraph/pipeline.hpp"
+#include "cgraph/incremental_update.hpp"
 #include "cgraph/protocol.hpp"
 
 #include <array>
@@ -146,9 +146,28 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
 
   DaemonState state;
   state.pid = ::getpid();
+
+  // The daemon owns the incremental file index: startup and every `update` op
+  // rebuild the graph the same way, so `update .` (a full stat-index rescan)
+  // keeps the resident snapshot current. `update` is wired through the state's
+  // injectable handler so all op dispatch stays in handle_daemon_request.
+  IncrementalGraphIndex index;
+  const auto rescan = [&]() {
+    const auto result = full_stat_index_rescan(state, index, identity.project_root);
+    const auto graph = read_graph_snapshot(state);
+    return nlohmann::json{
+        {"accepted", true},
+        {"full_rescan", result.full_rescan},
+        {"files_reextracted", result.files_reextracted},
+        {"files_removed", result.files_removed},
+        {"node_count", graph->nodes.size()},
+        {"edge_count", graph->edges.size()},
+    };
+  };
+  state.update_handler = [&](const nlohmann::json&) { return rescan(); };
+
   if (options.build_graph_on_start) {
-    auto pipeline = run_one_shot(identity.project_root);
-    publish_graph_snapshot(state, std::move(pipeline.graph));
+    (void)rescan();
   }
 
   std::cerr << "graphd listening on " << socket_path << " for root " << identity.project_root << '\n';

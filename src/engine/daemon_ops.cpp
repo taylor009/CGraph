@@ -169,6 +169,9 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
     return ok_response(explain_node(*graph, params));
   }
   if (op == "update") {
+    if (state.update_handler) {
+      return ok_response(state.update_handler(params));
+    }
     return ok_response({{"accepted", true}});
   }
   if (op == "status") {

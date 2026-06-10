@@ -30,6 +30,11 @@ struct DaemonState {
   std::size_t enrichment_running = 0;
   std::size_t enrichment_stale = 0;
   std::size_t enrichment_failed = 0;
+  // Performs a deterministic rebuild for an `update` op and returns its result
+  // payload. Injected by the running daemon (which owns the file index and
+  // project root); when unset, `update` is accepted as a no-op so in-process
+  // callers and tests need no rebuild wiring.
+  std::function<nlohmann::json(const nlohmann::json& params)> update_handler;
 };
 
 [[nodiscard]] std::shared_ptr<const GraphSnapshot> read_graph_snapshot(const DaemonState& state);
