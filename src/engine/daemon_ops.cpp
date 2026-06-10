@@ -25,6 +25,17 @@ constexpr std::size_t kDefaultQueryLimit = 50;
 constexpr std::size_t kDefaultImpactLimit = 200;
 constexpr int kDefaultImpactDepth = 3;
 
+// Context packing: a token budget to fill and how far around the focal symbol to
+// gather candidates.
+constexpr std::size_t kDefaultContextBudget = 6000;  // tokens
+constexpr int kDefaultContextDepth = 2;
+
+// Rough token estimate: ~4 characters per token. Good enough to pack a context
+// bundle under a budget without pulling in a real tokenizer.
+[[nodiscard]] std::size_t estimate_tokens(const std::string& text) {
+  return (text.size() + 3) / 4;
+}
+
 [[nodiscard]] nlohmann::json error_response(std::string message) {
   return nlohmann::json{{"ok", false}, {"error", std::move(message)}};
 }
@@ -111,6 +122,26 @@ struct Snippet {
     result.truncated = true;
   }
   return result;
+}
+
+// Enrich a brief with the focal node's full location block and an on-disk source
+// snippet (bounded by read_source_snippet). Used wherever a single node is the
+// subject and the code itself is worth returning.
+[[nodiscard]] nlohmann::json with_source(nlohmann::json brief, const Node& node) {
+  if (node.source_location && node.source_location->start_line > 0) {
+    brief["location"] = {
+        {"start_line", node.source_location->start_line},
+        {"start_column", node.source_location->start_column},
+        {"end_line", node.source_location->end_line},
+        {"end_column", node.source_location->end_column}};
+  }
+  if (const auto snippet = read_source_snippet(node); !snippet.text.empty()) {
+    brief["snippet"] = snippet.text;
+    if (snippet.truncated) {
+      brief["snippet_truncated"] = true;
+    }
+  }
+  return brief;
 }
 
 [[nodiscard]] std::unordered_map<std::string, const Node*> index_nodes(const GraphSnapshot& graph) {
@@ -277,6 +308,156 @@ struct Snippet {
   return result;
 }
 
+// Token-budgeted context bundle. Given a focal symbol (by id, label, or the
+// highest-centrality match for a query) and a token budget, gather the
+// surrounding neighborhood (undirected BFS to max_depth), rank it by
+// (depth asc, centrality desc), and greedily pack source snippets until the
+// budget fills. A candidate whose full snippet would overflow degrades to a
+// brief-only entry (so the agent still learns the symbol exists and where);
+// anything that no longer fits is counted in `omitted`. The focal node is always
+// included with its snippet, even if it alone exceeds the budget.
+[[nodiscard]] nlohmann::json pack_context(const GraphSnapshot& graph, const nlohmann::json& params) {
+  const auto budget = params.value("budget", kDefaultContextBudget);
+  const auto max_depth = std::max(0, params.value("max_depth", kDefaultContextDepth));
+  const auto by_id = index_nodes(graph);
+
+  // Resolve the focal node: exact id, then label, then the top-ranked match for
+  // a free-text query.
+  const Node* focal = nullptr;
+  if (const auto id = params.value("id", std::string{}); !id.empty()) {
+    if (const auto it = by_id.find(id); it != by_id.end()) {
+      focal = it->second;
+    } else {
+      for (const auto& node : graph.nodes) {
+        if (node.label == id) {
+          focal = &node;
+          break;
+        }
+      }
+    }
+  }
+  if (focal == nullptr) {
+    if (const auto needle = params.value("q", params.value("query", std::string{})); !needle.empty()) {
+      for (const auto* match : matching_nodes(graph, needle)) {
+        if (focal == nullptr || node_centrality(*match) > node_centrality(*focal)) {
+          focal = match;
+        }
+      }
+    }
+  }
+  if (focal == nullptr) {
+    return {{"focus", nullptr}, {"budget", budget}, {"tokens_used", 0},
+            {"included", nlohmann::json::array()}, {"omitted", 0}};
+  }
+
+  // Undirected neighborhood: callers, callees, container, and siblings reachable
+  // within max_depth are all relevant context for understanding the focal symbol.
+  struct Reached {
+    int depth = 0;
+    std::string via;
+  };
+  std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> adjacency;
+  for (const auto& edge : graph.edges) {
+    adjacency[edge.source].push_back({edge.target, edge.relation});
+    adjacency[edge.target].push_back({edge.source, edge.relation});
+  }
+  std::unordered_map<std::string, Reached> reached;
+  std::queue<std::string> frontier;
+  reached[focal->id] = {0, {}};
+  frontier.push(focal->id);
+  while (!frontier.empty()) {
+    const auto current = frontier.front();
+    frontier.pop();
+    const auto depth = reached[current].depth;
+    if (depth >= max_depth) {
+      continue;
+    }
+    const auto links = adjacency.find(current);
+    if (links == adjacency.end()) {
+      continue;
+    }
+    for (const auto& [to, relation] : links->second) {
+      if (reached.contains(to)) {
+        continue;
+      }
+      reached[to] = {depth + 1, relation};
+      frontier.push(to);
+    }
+  }
+
+  std::vector<const Node*> candidates;
+  for (const auto& [node_id, info] : reached) {
+    if (node_id == focal->id) {
+      continue;
+    }
+    if (const auto it = by_id.find(node_id); it != by_id.end()) {
+      candidates.push_back(it->second);
+    }
+  }
+  std::ranges::sort(candidates, [&](const Node* lhs, const Node* rhs) {
+    const auto ld = reached[lhs->id].depth;
+    const auto rd = reached[rhs->id].depth;
+    if (ld != rd) {
+      return ld < rd;  // nearer first
+    }
+    const auto lc = node_centrality(*lhs);
+    const auto rc = node_centrality(*rhs);
+    if (lc != rc) {
+      return lc > rc;  // more important first
+    }
+    return lhs->label < rhs->label;
+  });
+
+  // The focal node always leads, with its snippet.
+  auto focus = with_source(node_brief(*focal), *focal);
+  std::size_t used = estimate_tokens(focus.dump());
+
+  auto included = nlohmann::json::array();
+  std::size_t omitted = 0;
+  for (const auto* node : candidates) {
+    const auto depth = reached[node->id].depth;
+    const auto& via = reached[node->id].via;
+
+    auto full = with_source(node_brief(*node), *node);
+    full["depth"] = depth;
+    if (!via.empty()) {
+      full["via"] = via;
+    }
+    const auto full_cost = estimate_tokens(full.dump());
+    if (used + full_cost <= budget) {
+      used += full_cost;
+      included.push_back(std::move(full));
+      continue;
+    }
+
+    // Full snippet overflows: keep a brief-only entry if it still fits.
+    auto brief = node_brief(*node);
+    brief["depth"] = depth;
+    if (!via.empty()) {
+      brief["via"] = via;
+    }
+    brief["snippet_omitted"] = true;
+    const auto brief_cost = estimate_tokens(brief.dump());
+    if (used + brief_cost <= budget) {
+      used += brief_cost;
+      included.push_back(std::move(brief));
+    } else {
+      ++omitted;
+    }
+  }
+
+  nlohmann::json result{
+      {"focus", std::move(focus)},
+      {"budget", budget},
+      {"tokens_used", used},
+      {"included", std::move(included)},
+      {"omitted", omitted}};
+  if (omitted > 0 || used > budget) {
+    result["truncated"] = true;
+  }
+  return result;
+}
+
 [[nodiscard]] nlohmann::json explain_node(const GraphSnapshot& graph, const nlohmann::json& params) {
   const auto id = params.value("id", std::string{});
   const auto by_id = index_nodes(graph);
@@ -303,20 +484,7 @@ struct Snippet {
         neighbors.push_back(std::move(entry));
       }
 
-      auto result = node_brief(node);
-      if (node.source_location && node.source_location->start_line > 0) {
-        result["location"] = {
-            {"start_line", node.source_location->start_line},
-            {"start_column", node.source_location->start_column},
-            {"end_line", node.source_location->end_line},
-            {"end_column", node.source_location->end_column}};
-      }
-      if (const auto snippet = read_source_snippet(node); !snippet.text.empty()) {
-        result["snippet"] = snippet.text;
-        if (snippet.truncated) {
-          result["snippet_truncated"] = true;
-        }
-      }
+      auto result = with_source(node_brief(node), node);
       result["neighbors"] = std::move(neighbors);
       return result;
     }
@@ -450,6 +618,9 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
   }
   if (op == "impact") {
     return ok_response(impact_radius(*graph, params));
+  }
+  if (op == "context") {
+    return ok_response(pack_context(*graph, params));
   }
   if (op == "update") {
     if (state.update_handler) {

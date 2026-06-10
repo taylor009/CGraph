@@ -42,6 +42,14 @@ namespace {
            {"relation", {{"type", "string"}}},
            {"max_depth", {{"type", "integer"}}},
            {"limit", {{"type", "integer"}}}}),
+      tool_schema(
+          "graph_context",
+          "Token-budgeted context bundle for a symbol: the focal node plus its most relevant "
+          "neighbors with source snippets, greedily packed to fit a token budget",
+          {{"id", {{"type", "string"}}},
+           {"query", {{"type", "string"}}},
+           {"budget", {{"type", "integer"}}},
+           {"max_depth", {{"type", "integer"}}}}),
       tool_schema("graph_update", "Request a deterministic graph update", {{"path", {{"type", "string"}}}}),
       tool_schema("graph_status", "Return daemon graph and enrichment status", nlohmann::json::object()),
       tool_schema("graph_shutdown", "Ask the daemon to shut down", nlohmann::json::object()),
@@ -62,6 +70,11 @@ namespace {
     // Forward arguments verbatim; the daemon op applies direction/depth/limit
     // defaults. id is required and carried through.
     return make_request("impact", arguments);
+  }
+  if (name == "graph_context") {
+    // Forward arguments verbatim; the daemon op applies budget/depth defaults and
+    // resolves the focal node from id, label, or query.
+    return make_request("context", arguments);
   }
   if (name == "graph_update") {
     return make_request("update", arguments.empty() ? nlohmann::json::object() : arguments);

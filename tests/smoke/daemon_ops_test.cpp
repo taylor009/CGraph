@@ -121,6 +121,46 @@ int main() {
       neighbor["node"].value("label", std::string{}) != "Beta") {
     return 1;
   }
+
+  // Context packing: a generous budget bundles the focal node (with its snippet)
+  // plus its neighbors, staying within budget.
+  const auto context = cgraph::handle_daemon_request(
+      state, cgraph::make_request("context", {{"id", "a"}, {"budget", 5000}, {"max_depth", 2}}));
+  const auto& ctx = context["result"];
+  if (ctx["focus"].value("label", std::string{}) != "Alpha" ||
+      ctx["focus"].value("snippet", std::string{}).rfind("class Alpha {", 0) != 0) {
+    return 1;  // focal node leads, carrying its source
+  }
+  if (ctx.value("tokens_used", 0U) == 0U || ctx.value("tokens_used", 0U) > 5000U) {
+    return 1;  // packed something, and stayed within budget
+  }
+  // Both neighbors (b via a->b, c via c->a) are reachable undirected at depth 1.
+  if (ctx["included"].size() != 2) {
+    return 1;
+  }
+  for (const auto& item : ctx["included"]) {
+    if (item.value("depth", 0) != 1) {
+      return 1;
+    }
+  }
+
+  // A budget too small for any neighbor still returns the focal node and flags
+  // truncation rather than dropping everything.
+  const auto tight = cgraph::handle_daemon_request(
+      state, cgraph::make_request("context", {{"id", "a"}, {"budget", 1}}));
+  const auto& tight_ctx = tight["result"];
+  if (tight_ctx["focus"].value("label", std::string{}) != "Alpha" ||
+      !tight_ctx.value("truncated", false) || !tight_ctx["included"].empty()) {
+    return 1;
+  }
+
+  // Query-based focal resolution picks the highest-centrality match ("a").
+  const auto by_query = cgraph::handle_daemon_request(
+      state, cgraph::make_request("context", {{"query", "Alpha"}, {"budget", 5000}}));
+  if (by_query["result"]["focus"].value("id", std::string{}) != "a") {
+    return 1;
+  }
+
   fs::remove_all(src.parent_path());
 
   const auto update = cgraph::handle_daemon_request(state, cgraph::make_request("update"));
