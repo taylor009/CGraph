@@ -192,14 +192,26 @@ int main() {
   first.edges.push_back(cgraph::Edge{.source = "a", .target = "b", .relation = "USES"});
   first.edges.push_back(cgraph::Edge{.source = "a", .target = "b", .relation = "USES"});
 
+  first.hyperedges.push_back(cgraph::Hyperedge{.id = "h1", .nodes = {"a", "b"}, .relation = "GROUP"});
+
   cgraph::Fragment second;
   second.nodes.push_back(cgraph::Node{.id = "b", .label = "Beta", .source_file = "b.cpp", .kind = "function"});
   second.nodes.push_back(cgraph::Node{.id = "c", .label = "Gamma", .source_file = "c.cpp", .kind = "function"});
+  // Cross-fragment duplicate hyperedge id: the bulk merge must dedup it the same
+  // way it dedups nodes and edges (regression guard for the index-maintained merge).
+  second.hyperedges.push_back(cgraph::Hyperedge{.id = "h1", .nodes = {"a", "b"}, .relation = "GROUP"});
 
   const cgraph::Fragment fragments[] = {first, second};
   auto graph = cgraph::merge_fragments(fragments);
-  if (graph.nodes.size() != 3 || graph.edges.size() != 1) {
+  if (graph.nodes.size() != 3 || graph.edges.size() != 1 || graph.hyperedges.size() != 1) {
     return 1;
+  }
+  // First occurrence wins: the duplicate "a" (label "Alpha duplicate") must not
+  // overwrite the original. A last-wins regression would pass the count check above.
+  for (const auto& node : graph.nodes) {
+    if (node.id == "a" && node.label != "Alpha") {
+      return 1;
+    }
   }
 
   const cgraph::RawCall calls[] = {

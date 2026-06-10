@@ -67,8 +67,33 @@ constexpr std::string_view kCallRelation = "CALLS";
 GraphSnapshot merge_fragments(std::span<const Fragment> fragments) {
   GraphSnapshot graph;
   graph.build_state = BuildState::DeterministicReady;
+
+  // Maintain the dedup indexes once across every fragment. Calling
+  // merge_fragment() per fragment rebuilt these sets from the whole accumulated
+  // graph each time, making a bulk merge O(fragments * nodes) — the dominant
+  // cost of a cold build. First-occurrence-wins order is unchanged: a duplicate
+  // id (within or across fragments) fails the same insert and is skipped.
+  std::unordered_set<std::string> node_ids;
+  std::unordered_set<std::string> edge_ids;
+  std::unordered_set<std::string> hyperedge_ids;
+
   for (const auto& fragment : fragments) {
-    merge_fragment(graph, fragment);
+    for (auto node : fragment.nodes) {
+      node.id = node_key(node);
+      if (node_ids.insert(node.id).second) {
+        graph.nodes.push_back(std::move(node));
+      }
+    }
+    for (const auto& edge : fragment.edges) {
+      if (edge_ids.insert(edge_key(edge)).second) {
+        graph.edges.push_back(edge);
+      }
+    }
+    for (const auto& hyperedge : fragment.hyperedges) {
+      if (hyperedge_ids.insert(hyperedge.id).second) {
+        graph.hyperedges.push_back(hyperedge);
+      }
+    }
   }
   return graph;
 }
