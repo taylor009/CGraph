@@ -1,5 +1,7 @@
 #include "cgraph/client_runtime.hpp"
 
+#include "cgraph/daemon_endpoint.hpp"
+#include "cgraph/daemon_server.hpp"
 #include "cgraph/protocol.hpp"
 
 #include <algorithm>
@@ -11,6 +13,7 @@
 #include <unordered_map>
 
 #ifndef _WIN32
+#include <fcntl.h>
 #include <sys/types.h>
 #include <unistd.h>
 #endif
@@ -48,8 +51,8 @@ std::chrono::milliseconds backoff_for(const ClientRequest& request, int attempt)
 
 ClientRuntimeHooks default_client_runtime_hooks(const ClientRequest& request) {
   ClientRuntimeHooks hooks;
-  hooks.connect = [](const DaemonIdentity&, const nlohmann::json&) -> std::optional<nlohmann::json> {
-    return std::nullopt;
+  hooks.connect = [](const DaemonIdentity& identity, const nlohmann::json& frame) -> std::optional<nlohmann::json> {
+    return request_over_unix_socket(unix_socket_path(identity), frame);
   };
   hooks.spawn = [daemon_path = request.daemon_path](const DaemonIdentity& identity) {
     if (daemon_path.empty()) {
@@ -64,6 +67,19 @@ ClientRuntimeHooks default_client_runtime_hooks(const ClientRequest& request) {
       return false;
     }
     if (pid == 0) {
+      // Detach the daemon from the client: a new session (no controlling
+      // terminal) and stdio pointed at /dev/null, so the resident daemon never
+      // holds the client's pipes open (which would make the client's caller
+      // hang waiting for EOF) and outlives this short-lived client cleanly.
+      ::setsid();
+      if (const int devnull = ::open("/dev/null", O_RDWR); devnull >= 0) {
+        ::dup2(devnull, STDIN_FILENO);
+        ::dup2(devnull, STDOUT_FILENO);
+        ::dup2(devnull, STDERR_FILENO);
+        if (devnull > STDERR_FILENO) {
+          ::close(devnull);
+        }
+      }
       const auto daemon = daemon_path.string();
       const auto root = identity.project_root.string();
       ::execl(daemon.c_str(), daemon.c_str(), "--root", root.c_str(), nullptr);

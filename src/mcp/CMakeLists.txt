@@ -21,6 +21,7 @@ add_executable(cgraph-mcp
 target_link_libraries(cgraph-mcp
   PRIVATE
     cgraph::mcp
+    cgraph::client_runtime
     cgraph::engine)
 
 cgraph_set_warnings(cgraph-mcp)

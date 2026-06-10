@@ -1,11 +1,40 @@
-#include "cgraph/daemon_ops.hpp"
+#include "cgraph/client_runtime.hpp"
 #include "cgraph/mcp_server.hpp"
 
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
 
-int main() {
-  cgraph::DaemonState state;
+int main(int argc, char** argv) {
+  cgraph::ClientRequest base;
+  base.project_root = std::filesystem::current_path();
+  if (const auto* env = std::getenv("CGRAPH_DAEMON_PATH"); env != nullptr && env[0] != '\0') {
+    base.daemon_path = env;
+  }
+  for (int index = 1; index < argc; ++index) {
+    const std::string arg = argv[index];
+    if ((arg == "--root" || arg == "-r") && index + 1 < argc) {
+      base.project_root = argv[++index];
+    } else if (arg == "--daemon" && index + 1 < argc) {
+      base.daemon_path = argv[++index];
+    }
+  }
+
+  // Route every tool's daemon op to the resident per-project daemon through the
+  // thin-client runtime (connect, auto-spawn, backoff) instead of answering from
+  // an empty in-process state.
+  const auto dispatch = [&](const nlohmann::json& daemon_request) -> nlohmann::json {
+    cgraph::ClientRequest request = base;
+    request.operation = daemon_request.value("op", std::string{});
+    request.params = daemon_request.value("params", nlohmann::json::object());
+    const auto result = cgraph::send_thin_client_request(request, cgraph::default_client_runtime_hooks(request));
+    if (result.response) {
+      return *result.response;
+    }
+    return nlohmann::json{{"ok", false}, {"error", result.error}};
+  };
+
   std::string line;
   while (std::getline(std::cin, line)) {
     const auto request = nlohmann::json::parse(line, nullptr, false);
@@ -13,9 +42,7 @@ int main() {
       std::cout << nlohmann::json{{"jsonrpc", "2.0"}, {"id", nullptr}, {"error", {{"code", -32700}, {"message", "parse error"}}}}.dump() << '\n';
       continue;
     }
-    const auto response = cgraph::handle_mcp_request(request, [&](const nlohmann::json& daemon_request) {
-      return cgraph::handle_daemon_request(state, daemon_request);
-    });
+    const auto response = cgraph::handle_mcp_request(request, dispatch);
     if (!response.empty()) {
       std::cout << response.dump() << '\n';
     }

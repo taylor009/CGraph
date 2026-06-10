@@ -392,6 +392,18 @@ cgraph_enable_sanitizers(cgraph_semantic_orchestration_test)
 
 add_test(NAME cgraph_semantic_orchestration_test COMMAND cgraph_semantic_orchestration_test)
 
+add_executable(cgraph_daemon_server_test
+  daemon_server_test.cpp)
+
+target_link_libraries(cgraph_daemon_server_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_daemon_server_test)
+cgraph_enable_sanitizers(cgraph_daemon_server_test)
+
+add_test(NAME cgraph_daemon_server_test COMMAND cgraph_daemon_server_test)
+
 add_executable(cgraph_dedup_test
   dedup_test.cpp)
 

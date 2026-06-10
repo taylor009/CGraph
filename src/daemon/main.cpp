@@ -1,15 +1,18 @@
 #include "cgraph/daemon_lifecycle.hpp"
 #include "cgraph/daemon_ops.hpp"
+#include "cgraph/daemon_server.hpp"
 #include "cgraph/engine.hpp"
 #include "cgraph/protocol.hpp"
 
+#include <chrono>
 #include <iostream>
 #include <string>
 
 namespace {
 
 void print_usage() {
-  std::cout << "Usage: graphd [--version] [--benchmark-query --graph PATH --query TEXT]\n";
+  std::cout << "Usage: graphd [--root PATH] [--idle-timeout SECONDS] [--version]\n"
+               "             [--benchmark-query --graph PATH --query TEXT]\n";
 }
 
 }  // namespace
@@ -17,8 +20,10 @@ void print_usage() {
 int main(int argc, char** argv) {
   const auto info = cgraph::build_info();
   std::filesystem::path graph_path;
+  std::filesystem::path root;
   std::string query;
   bool benchmark_query = false;
+  std::chrono::seconds idle_timeout{300};
 
   for (int index = 1; index < argc; ++index) {
     const std::string arg = argv[index];
@@ -29,6 +34,14 @@ int main(int argc, char** argv) {
     if (arg == "--version") {
       std::cout << "graphd " << info.version << '\n';
       return 0;
+    }
+    if ((arg == "--root" || arg == "-r") && index + 1 < argc) {
+      root = argv[++index];
+      continue;
+    }
+    if (arg == "--idle-timeout" && index + 1 < argc) {
+      idle_timeout = std::chrono::seconds(std::stoll(argv[++index]));
+      continue;
     }
     if (arg == "--benchmark-query") {
       benchmark_query = true;
@@ -65,6 +78,12 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  std::cout << "graphd " << info.version << '\n';
-  return 0;
+  if (root.empty()) {
+    print_usage();
+    return 2;
+  }
+
+  cgraph::DaemonServerOptions options;
+  options.idle_timeout = idle_timeout;
+  return cgraph::run_daemon_server(root, options);
 }
