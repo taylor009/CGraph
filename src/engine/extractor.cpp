@@ -66,17 +66,15 @@ using TreePtr = std::unique_ptr<TSTree, TreeDeleter>;
     return node_text(*child, context.source);
   }
 
-  // Anonymous function expressions — inline arrows and callbacks
-  // (`onClick={() => ...}`, `arr.map(x => ...)`) — have no name. They must not
-  // become nodes labelled with their entire body, which floods a JS/TS graph
-  // with thousands of junk nodes. Named arrows (`const Foo = () => {}`) are
-  // recovered by the language's resolve_function_name above.
-  if (const std::string_view type = ts_node_type(node);
-      type == "arrow_function" || type == "function_expression") {
-    return {};
-  }
-
-  return node_text(node, context.source);
+  // No name could be resolved, so the construct is anonymous: an inline arrow or
+  // callback in JS/TS (`onClick={() => ...}`, `arr.map(x => ...)`), or an
+  // anonymous namespace / struct / union / enum in C/C++. Such a node must NOT
+  // be labelled with its entire body — that produces a giant junk node that
+  // floods the graph and dominates centrality rankings. Skip it; add_symbol_node
+  // returns empty, the enclosing scope is unchanged, and the construct's members
+  // are still walked and attached to the real scope that contains it. Named
+  // constructs are recovered above via resolve_function_name or a name field.
+  return {};
 }
 
 // An arrow function is a call scope (its body's calls are attributed to it)
