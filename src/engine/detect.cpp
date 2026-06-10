@@ -1,10 +1,10 @@
 #include "cgraph/detect.hpp"
 
+#include "cgraph/path_ignore.hpp"
+
 #include <algorithm>
-#include <fstream>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 #include <vector>
 
 namespace cgraph {
@@ -33,90 +33,6 @@ namespace {
   return ends_with(filename, ".csproj") || ends_with(filename, ".vbproj") ||
          ends_with(filename, ".fsproj") || ends_with(filename, ".vcxproj") ||
          ends_with(filename, ".props") || ends_with(filename, ".targets");
-}
-
-[[nodiscard]] bool is_skipped_directory(std::string_view name) {
-  static const std::unordered_set<std::string_view> skipped = {
-      ".git",
-      ".hg",
-      ".svn",
-      ".cache",
-      ".idea",
-      ".vscode",
-      "build",
-      "cmake-build-debug",
-      "cmake-build-release",
-      "dist",
-      "node_modules",
-      "target",
-      "vendor",
-      "cgraph-out",
-      "graphify-out",
-  };
-  return skipped.contains(name);
-}
-
-[[nodiscard]] std::vector<std::string> read_root_gitignore(const std::filesystem::path& root) {
-  std::vector<std::string> patterns;
-  std::ifstream input(root / ".gitignore");
-  std::string line;
-  while (std::getline(input, line)) {
-    line.erase(line.find_last_not_of(" \t\r\n") + 1);
-    const auto first = line.find_first_not_of(" \t");
-    if (first == std::string::npos) {
-      continue;
-    }
-    line.erase(0, first);
-    if (line.empty() || line[0] == '#' || line[0] == '!') {
-      continue;
-    }
-    if (!line.empty() && line.back() == '/') {
-      line.pop_back();
-    }
-    if (!line.empty()) {
-      patterns.push_back(line);
-    }
-  }
-  return patterns;
-}
-
-[[nodiscard]] bool matches_simple_gitignore(
-    const std::filesystem::path& root,
-    const std::filesystem::path& path,
-    const std::vector<std::string>& patterns) {
-  if (patterns.empty()) {
-    return false;
-  }
-
-  const auto relative = std::filesystem::relative(path, root).generic_string();
-  const auto filename = path.filename().generic_string();
-
-  for (const auto& pattern : patterns) {
-    if (pattern.empty()) {
-      continue;
-    }
-
-    if (pattern.front() == '/') {
-      if (relative == pattern.substr(1) || relative.starts_with(pattern.substr(1) + "/")) {
-        return true;
-      }
-      continue;
-    }
-
-    if (pattern.find('/') == std::string::npos) {
-      if (filename == pattern || relative == pattern || relative.starts_with(pattern + "/") ||
-          relative.find("/" + pattern + "/") != std::string::npos) {
-        return true;
-      }
-      continue;
-    }
-
-    if (relative == pattern || relative.starts_with(pattern + "/")) {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 }  // namespace

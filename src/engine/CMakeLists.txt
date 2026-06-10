@@ -23,6 +23,7 @@ add_library(cgraph_engine STATIC
   non_grammar_extractors.cpp
   normalize.cpp
   parser_pool.cpp
+  path_ignore.cpp
   pipeline.cpp
   protocol.cpp
   python_extractor.cpp

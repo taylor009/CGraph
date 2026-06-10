@@ -37,7 +37,10 @@ bool has_edge(const cgraph::GraphSnapshot& graph, const std::string& source, con
 }  // namespace
 
 int main() {
-  const auto root = std::filesystem::temp_directory_path() / "cgraph-semantic-ingest-test";
+  // weakly_canonical: the planner canonicalizes root internally, so planned
+  // input paths are canonical; build the comparison root the same way.
+  const auto root =
+      std::filesystem::weakly_canonical(std::filesystem::temp_directory_path() / "cgraph-semantic-ingest-test");
   std::filesystem::remove_all(root);
   std::filesystem::create_directories(root);
 

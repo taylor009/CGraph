@@ -2,34 +2,12 @@
 
 #include "cgraph/file_cache.hpp"
 #include "cgraph/file_watcher.hpp"
+#include "cgraph/path_ignore.hpp"
 
 #include <algorithm>
-#include <string_view>
-#include <unordered_set>
 
 namespace cgraph {
 namespace {
-
-[[nodiscard]] bool is_skipped_directory(std::string_view name) {
-  static const std::unordered_set<std::string_view> skipped = {
-      ".git",
-      ".hg",
-      ".svn",
-      ".cache",
-      ".idea",
-      ".vscode",
-      "build",
-      "cmake-build-debug",
-      "cmake-build-release",
-      "dist",
-      "node_modules",
-      "target",
-      "vendor",
-      "cgraph-out",
-      "graphify-out",
-  };
-  return skipped.contains(name);
-}
 
 [[nodiscard]] bool is_excluded_dir(
     const std::filesystem::path& dir,
@@ -47,9 +25,11 @@ namespace {
     const std::filesystem::path& root,
     const std::vector<std::filesystem::path>& excluded_dirs) {
   std::vector<std::filesystem::path> paths;
+  const auto canonical_root = std::filesystem::weakly_canonical(root);
+  const auto gitignore_patterns = read_root_gitignore(canonical_root);
   std::error_code error;
   std::filesystem::recursive_directory_iterator iterator(
-      root,
+      canonical_root,
       std::filesystem::directory_options::skip_permission_denied,
       error);
   const std::filesystem::recursive_directory_iterator end;
@@ -58,12 +38,16 @@ namespace {
     const auto& entry = *iterator;
     const auto name = entry.path().filename().generic_string();
     if (entry.is_directory(error)) {
-      if (is_skipped_directory(name) || is_excluded_dir(entry.path(), excluded_dirs)) {
+      if (is_skipped_directory(name) || is_excluded_dir(entry.path(), excluded_dirs) ||
+          matches_simple_gitignore(canonical_root, entry.path(), gitignore_patterns)) {
         iterator.disable_recursion_pending();
       }
       continue;
     }
     if (!entry.is_regular_file(error) || !is_watchable_file(entry.path())) {
+      continue;
+    }
+    if (matches_simple_gitignore(canonical_root, entry.path(), gitignore_patterns)) {
       continue;
     }
     if (classify_watched_file(entry.path()) == WatchedFileKind::Code) {

@@ -28,7 +28,11 @@ std::unordered_set<std::string> planned_paths(const cgraph::SemanticChunkPlan& p
 }  // namespace
 
 int main() {
-  const auto root = std::filesystem::temp_directory_path() / "cgraph-semantic-chunk-plan-test";
+  // Canonicalize the root: the planner canonicalizes internally (to match the
+  // code scanner and to resolve the /tmp -> /private/tmp symlink on macOS), so
+  // expected paths must be built from the canonical root to compare equal.
+  const auto root =
+      std::filesystem::weakly_canonical(std::filesystem::temp_directory_path() / "cgraph-semantic-chunk-plan-test");
   std::filesystem::remove_all(root);
   std::filesystem::create_directories(root);
 
@@ -38,8 +42,15 @@ int main() {
   const auto media = root / "media" / "diagram.png";
   const auto code = root / "src" / "main.py";
   const auto ignored = root / "build" / "generated.md";
+  const auto gitignored = root / "vendored" / "toolchain.md";
   const auto cached_fragment = root / "graphify-out" / "semantic" / "chunk_00.json";
   const auto changed_fragment = root / "graphify-out" / "semantic" / "chunk_old.json";
+
+  // A root .gitignore must be honored by the planner exactly as the code scanner
+  // honors it — otherwise a vendored, git-ignored tree (this repo's own .vcpkg)
+  // floods the plan with thousands of irrelevant docs. `build/` is already in the
+  // always-skip set; `/vendored/` exercises a gitignore-only exclusion.
+  write_file(root / ".gitignore", "/vendored/\n");
 
   write_file(cached_doc, "# Cached\nNo work needed\n");
   write_file(changed_doc, "# Changed\nBefore\n");
@@ -47,6 +58,7 @@ int main() {
   write_file(media, "png bytes");
   write_file(code, "class CodeOnly:\n    pass\n");
   write_file(ignored, "# ignored\n");
+  write_file(gitignored, "# vendored doc, must be skipped via .gitignore\n");
   write_file(cached_fragment, "{\"nodes\":[],\"edges\":[]}\n");
   write_file(changed_fragment, "{\"nodes\":[],\"edges\":[]}\n");
 
@@ -64,7 +76,7 @@ int main() {
     return 1;
   }
   if (paths.contains(cached_doc.generic_string()) || paths.contains(code.generic_string()) ||
-      paths.contains(ignored.generic_string())) {
+      paths.contains(ignored.generic_string()) || paths.contains(gitignored.generic_string())) {
     return 1;
   }
   if (!paths.contains(changed_doc.generic_string()) || !paths.contains(new_doc.generic_string()) ||

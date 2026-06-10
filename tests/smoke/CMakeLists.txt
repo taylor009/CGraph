@@ -46,6 +46,18 @@ cgraph_enable_sanitizers(cgraph_detect_test)
 
 add_test(NAME cgraph_detect_test COMMAND cgraph_detect_test)
 
+add_executable(cgraph_path_ignore_test
+  path_ignore_test.cpp)
+
+target_link_libraries(cgraph_path_ignore_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_path_ignore_test)
+cgraph_enable_sanitizers(cgraph_path_ignore_test)
+
+add_test(NAME cgraph_path_ignore_test COMMAND cgraph_path_ignore_test)
+
 add_executable(cgraph_language_config_test
   language_config_test.cpp)
 
