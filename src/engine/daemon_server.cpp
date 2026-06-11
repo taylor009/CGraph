@@ -18,6 +18,7 @@
 #include <unordered_map>
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstring>
 #include <iostream>
@@ -271,14 +272,27 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   const auto manifest_path = out_dir / "index-manifest.json";
 
   IncrementalGraphIndex index;
+  // Whether index.files holds extractions for the whole tree. A full rescan
+  // hydrates it; the Tier-1 fast path (persisted graph load) does NOT — it only
+  // publishes the snapshot. Incremental updates rebuild the graph from
+  // index.files, so applying one against a non-hydrated index would replace the
+  // full graph with just the changed files.
+  std::atomic<bool> index_hydrated{false};
 
-  // Writes graph.json + the file manifest atomically. Logged, never fatal: a
-  // failed persist only means the next restart rebuilds rather than fast-loads.
-  const auto persist_graph_and_manifest = [&]() {
-    if (!persist_graph_snapshot(state, graph_path)) {
-      std::cerr << "graphd: failed to persist " << graph_path << '\n';
-      return;
-    }
+  // Periodic persistence of incremental state: watcher/fragment changes mark the
+  // graph dirty, and the serve loop re-persists graph.json + manifest once the
+  // change has been memory-only for persist_interval (and again on exit), so a
+  // crash or idle shutdown never loses more than that window.
+  DaemonLifecycleState lifecycle;
+  DaemonLifecycleConfig lifecycle_config;
+  lifecycle_config.endpoint_path = socket_path;
+  lifecycle_config.graph_path = graph_path;
+  lifecycle_config.idle_timeout = options.idle_timeout;
+  lifecycle_config.persist_interval = options.persist_interval;
+
+  // Writes the file manifest the persisted graph was built from. Logged, never
+  // fatal: a failed persist only means the next restart rebuilds, not fast-loads.
+  const auto persist_manifest = [&]() {
     IndexManifest manifest;
     manifest.version_key = index_version_key();
     manifest.files.reserve(index.cache.size());
@@ -290,9 +304,19 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     }
   };
 
+  // Writes graph.json + the file manifest atomically.
+  const auto persist_graph_and_manifest = [&]() {
+    if (!persist_graph_snapshot(state, graph_path)) {
+      std::cerr << "graphd: failed to persist " << graph_path << '\n';
+      return;
+    }
+    persist_manifest();
+  };
+
   const auto rescan = [&]() {
     const std::scoped_lock lock(graph_mutex);
     const auto result = full_stat_index_rescan(state, index, identity.project_root);
+    index_hydrated.store(true);
     ingest_all_drops();
     // Persist as soon as the graph is final (post semantic overlay) and before
     // enrichment planning, which walks the whole project and can take seconds on
@@ -334,7 +358,27 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     request_refresh();
     return true;
   };
-  state.update_handler = [&](const nlohmann::json&) { return rescan(); };
+  state.update_handler = [&](const nlohmann::json&) {
+    auto result = rescan();
+    // rescan persisted graph + manifest itself; nothing is memory-only now.
+    // Runs on the serve-loop thread, the same thread that marks/persists.
+    lifecycle.graph_dirty = false;
+    return result;
+  };
+
+  // Live code watching: the serve loop polls the project tree on its own cadence
+  // and folds changed files into the graph incrementally. The watcher is primed
+  // (baseline snapshot, no events) on the build thread right before the initial
+  // build, so changes that land while the build runs still surface as events on
+  // the first post-build poll; the loop only polls once the baseline graph
+  // exists (initial_build_done), so an event can never rebuild from a
+  // half-populated index.
+  const bool watch_code = options.code_poll_interval.count() > 0;
+  FileWatcher code_watcher(
+      identity.project_root,
+      FileWatcherOptions{.debounce = options.watch_debounce, .max_pending_events = options.watch_max_pending});
+  std::atomic<bool> initial_build_done{false};
+  state.watching = watch_code && options.build_graph_on_start;
 
   // Build on a worker thread so the accept loop below starts serving at once.
   // rescan() locks graph_mutex; status/query answer from the empty snapshot until
@@ -342,9 +386,13 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   std::thread build_thread;
   if (options.build_graph_on_start) {
     build_thread = std::thread([&] {
+      if (watch_code) {
+        (void)code_watcher.poll(FileWatcherClock::now());  // prime: baseline only, no events
+      }
       if (!try_load_persisted()) {
         (void)rescan();
       }
+      initial_build_done.store(true);  // hands the watcher to the serve loop
     });
   }
 
@@ -369,6 +417,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   std::cerr << "graphd listening on " << socket_path << " for root " << identity.project_root << '\n';
 
   auto last_activity = FileWatcherClock::now();
+  auto last_code_poll = FileWatcherClock::now();
   while (!state.shutdown_requested) {
     fd_set read_set;
     FD_ZERO(&read_set);
@@ -401,8 +450,64 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
       }
       if (merged_any) {
         write_semantic_cache(cache, cache_path);
+        mark_graph_dirty(lifecycle, DaemonClock::now());  // overlay is memory-only until persisted
       }
       request_refresh();
+    }
+
+    // Fold live code changes into the graph. Each watcher poll walks the project
+    // tree, so it runs on its own (slower) cadence than the drop poll, and only
+    // once the initial build has published a baseline.
+    if (watch_code && initial_build_done.load() &&
+        FileWatcherClock::now() - last_code_poll >= options.code_poll_interval) {
+      last_code_poll = FileWatcherClock::now();
+      const auto events = code_watcher.poll(last_code_poll);
+      bool code_changed = false;
+      bool docs_changed = false;
+      for (const auto& event : events) {
+        if (event.change == FileWatchChange::Overflow || event.kind == WatchedFileKind::Code) {
+          code_changed = true;
+        } else {
+          docs_changed = true;
+        }
+      }
+      if (code_changed) {
+        // Neighborhood dedup keeps each incremental update fast, but it skips
+        // the fuzzy-duplicate merges a full pass makes elsewhere in the graph,
+        // so the node set drifts above the canonical build's. Reconciling with
+        // a full dedup every Nth update bounds that drift; an explicit `update`
+        // op or a restart rescan also reconverges it.
+        constexpr std::size_t kFullDedupReconcileEvery = 5;
+        const std::scoped_lock lock(graph_mutex);
+        IncrementalUpdateResult result;
+        if (index_hydrated.load()) {
+          result = apply_incremental_code_updates(
+              state, index, events, IncrementalDedupPolicy{.full_reconcile_every = kFullDedupReconcileEvery});
+        } else {
+          // First edit after a fast-load restart: hydrate the index with one
+          // full rescan (a per-file rebuild here would wipe the graph), then
+          // subsequent events go incremental.
+          result = full_stat_index_rescan(state, index, identity.project_root);
+          index_hydrated.store(true);
+        }
+        ingest_all_drops();  // the rebuild is code-only; re-overlay semantic fragments
+        ++state.incremental_updates;
+        mark_graph_dirty(lifecycle, DaemonClock::now());
+        last_activity = FileWatcherClock::now();  // active editing keeps the daemon alive
+        std::cerr << "graphd: incremental update (" << result.files_reextracted << " re-extracted, "
+                  << result.files_removed << " removed" << (result.full_rescan ? ", full rescan" : "") << ")\n";
+      }
+      if (docs_changed) {
+        request_refresh();  // doc/media changes only move the enrichment plan
+      }
+    }
+
+    // Re-persist graph + manifest once incremental changes have aged past the
+    // persist interval, so a crash loses at most that window.
+    if (persist_if_due(state, lifecycle, lifecycle_config, DaemonClock::now())) {
+      const std::scoped_lock lock(graph_mutex);
+      persist_manifest();
+      std::cerr << "graphd: persisted incremental graph state\n";
     }
 
     if (ready == 0) {
@@ -431,6 +536,13 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
 
   if (build_thread.joinable()) {
     build_thread.join();  // captures locals by reference: join before they leave scope
+  }
+  // Flush any incremental state still memory-only (the persist interval had not
+  // elapsed) so an idle timeout or shutdown op never drops applied changes.
+  if (lifecycle.graph_dirty) {
+    const std::scoped_lock lock(graph_mutex);
+    persist_graph_and_manifest();
+    std::cerr << "graphd: persisted incremental graph state on exit\n";
   }
   {
     const std::scoped_lock lock(refresh_mutex);

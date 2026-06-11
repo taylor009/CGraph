@@ -92,6 +92,34 @@ int main() {
     return 1;
   }
 
+  // The watcher honors the root .gitignore exactly like detect_project_files:
+  // a gitignored file must never produce an event, or an incremental update
+  // would add nodes a full rescan later drops.
+  write_file(root / ".gitignore", "scratch\n");
+  const auto gitignored = root / "scratch" / "temp.py";
+  const auto watched_peer = root / "src" / "peer.py";
+  write_file(gitignored, "print('ignored')\n");
+  write_file(watched_peer, "print('watched')\n");
+  (void)watcher.poll(start + 240ms);
+  const auto after_ignore = watcher.poll(start + 300ms);
+  if (!has_event(after_ignore, watched_peer, cgraph::FileWatchChange::Created, cgraph::WatchedFileKind::Code) ||
+      has_event(after_ignore, gitignored, cgraph::FileWatchChange::Created, cgraph::WatchedFileKind::Code)) {
+    return 1;
+  }
+
+  // A flood of events past max_pending_events collapses into one Overflow (the
+  // caller's signal to do a full rescan instead of per-file updates).
+  cgraph::FileWatcher tiny(root, cgraph::FileWatcherOptions{.debounce = 50ms, .max_pending_events = 2});
+  (void)tiny.poll(start + 400ms);  // prime
+  write_file(root / "src" / "bulk_a.py", "a = 1\n");
+  write_file(root / "src" / "bulk_b.py", "b = 2\n");
+  write_file(root / "src" / "bulk_c.py", "c = 3\n");
+  const auto overflow = tiny.poll(start + 410ms);
+  if (overflow.size() != 1 || overflow[0].change != cgraph::FileWatchChange::Overflow ||
+      overflow[0].path != root) {
+    return 1;
+  }
+
   std::filesystem::remove_all(root);
   return 0;
 }

@@ -61,7 +61,7 @@ treat it as load-bearing.
 - `daemon_ops.cpp::handle_daemon_request` dispatches the eight ops (`query`/`path`/`explain`/`impact`/`context`/`update`/`status`/`shutdown`). Graph state is a `shared_ptr<const GraphSnapshot>` read under `snapshot_mutex`; mutations go through a **single-writer path** (`writer_mutex`, `publish_graph_snapshot`/`mutate_graph_snapshot`).
 - `protocol.cpp` — length-prefixed JSON frames, `kProtocolVersion = 1`; version-checked on every message.
 - `client_runtime.cpp` — thin client with connect/spawn/backoff hooks (`ClientRuntimeHooks`); auto-spawns the daemon if absent.
-- `incremental_update.cpp` + `file_watcher.cpp` + `file_cache.cpp` — `update .` triggers a full stat-index rescan; the watcher feeds incremental graph updates.
+- `incremental_update.cpp` + `file_watcher.cpp` + `file_cache.cpp` — `update .` triggers a full stat-index rescan; the serve loop polls the (gitignore-aware) watcher on `code_poll_interval` and applies incremental updates, with a hydrating full rescan on the first edit after a fast-load restart and a full-dedup reconcile every 5th update. Incremental state re-persists via `persist_if_due` and on exit.
 - `daemon_security.cpp` / `daemon_hardening` tests — endpoint hardening surface.
 
 **Semantic enrichment ingest** (`semantic-fragment-ingest`, host-orchestrated, no LLM in binary):

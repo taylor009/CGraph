@@ -202,7 +202,7 @@ of blind grep/read. It exposes eight tools:
 | `graph_impact` | Transitive blast radius of changing a node |
 | `graph_path` | Shortest path between two nodes |
 | `graph_context` | Token-budgeted source bundle for a node/query |
-| `graph_update` | Re-scan the project into the graph |
+| `graph_update` | Force a full rescan (the daemon also watches the tree and updates automatically) |
 | `graph_status` | Daemon, graph, and enrichment status |
 | `graph_shutdown` | Stop the daemon |
 
@@ -345,10 +345,16 @@ Start the graph daemon:
 build/default/src/daemon/graphd --root /path/to/project
 ```
 
+The daemon watches the project tree while it runs: source edits are folded into
+the graph incrementally within a couple of seconds (a large batch, e.g. a branch
+switch, collapses into one full rescan), and incremental state is re-persisted to
+`cgraph-out/` in the background and on shutdown. `--no-watch` disables this and
+leaves updates to explicit `update` ops.
+
 Optional daemon flags:
 
 ```sh
-graphd --root PATH --idle-timeout SECONDS
+graphd --root PATH --idle-timeout SECONDS --no-watch
 graphd --benchmark-query --graph PATH --query TEXT
 graphd --version
 ```

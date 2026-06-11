@@ -30,6 +30,10 @@ struct DaemonState {
   std::size_t enrichment_running = 0;
   std::size_t enrichment_stale = 0;
   std::size_t enrichment_failed = 0;
+  // Live code watching: whether the serve loop folds file changes into the
+  // graph automatically, and how many incremental updates it has applied.
+  bool watching = false;
+  std::size_t incremental_updates = 0;
   // Performs a deterministic rebuild for an `update` op and returns its result
   // payload. Injected by the running daemon (which owns the file index and
   // project root); when unset, `update` is accepted as a no-op so in-process

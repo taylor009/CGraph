@@ -75,10 +75,22 @@ int main() {
   if (cgraph::persist_if_due(state, lifecycle, config, start + 9s)) {
     return 1;
   }
+  // Re-marking while already dirty must NOT push the deadline out: dirty_since
+  // anchors to the first unpersisted change, so a steady edit stream still
+  // persists once the interval elapses.
+  cgraph::mark_graph_dirty(lifecycle, start + 10s);
+  if (lifecycle.dirty_since != start + 1s) {
+    return 1;
+  }
   if (!cgraph::persist_if_due(state, lifecycle, config, start + 11s) || lifecycle.graph_dirty) {
     return 1;
   }
   if (cgraph::persist_if_due(state, lifecycle, config, start + 12s)) {
+    return 1;
+  }
+  // After a persist, the next mark re-anchors dirty_since.
+  cgraph::mark_graph_dirty(lifecycle, start + 20s);
+  if (lifecycle.dirty_since != start + 20s || !lifecycle.graph_dirty) {
     return 1;
   }
 

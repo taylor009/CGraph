@@ -6,6 +6,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <iterator>
 #include <optional>
 #include <thread>
 
@@ -14,6 +16,15 @@ namespace {
 void write_file(const std::filesystem::path& path, std::string contents) {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream(path, std::ios::binary) << contents;
+}
+
+// Records a failed expectation with a name, so a CI flake says WHICH step
+// failed instead of a bare non-zero exit.
+void expect(bool& ok, bool condition, const char* what) {
+  if (!condition) {
+    std::cerr << "FAIL: " << what << '\n';
+    ok = false;
+  }
 }
 
 std::optional<nlohmann::json> request_with_retry(const std::filesystem::path& socket_path, const nlohmann::json& req) {
@@ -45,8 +56,12 @@ int main() {
   fs::remove(socket_path);
 
   cgraph::DaemonServerOptions options;
-  options.idle_timeout = std::chrono::seconds(5);
+  options.idle_timeout = std::chrono::seconds(60);
   options.build_graph_on_start = true;  // build the real graph so update has a baseline
+  // Fast watch/persist cadence so live-watch coverage below runs in test time.
+  options.code_poll_interval = std::chrono::milliseconds(50);
+  options.watch_debounce = std::chrono::milliseconds(50);
+  options.persist_interval = std::chrono::seconds(1);
 
   int server_rc = -1;
   std::thread server([&] { server_rc = cgraph::run_daemon_server(root, options); });
@@ -59,24 +74,24 @@ int main() {
   int nodes_before = 0;
   for (int attempt = 0; attempt < 200 && nodes_before < 2; ++attempt) {
     const auto status = request_with_retry(socket_path, cgraph::make_request("status"));
-    ok = ok && status && (*status)["ok"] == true;
+    expect(ok, status && (*status)["ok"] == true, "status round-trip");
     nodes_before = status ? (*status)["result"].value("node_count", 0) : 0;
     if (nodes_before < 2) {
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
   }
-  ok = ok && nodes_before >= 2;
+  expect(ok, nodes_before >= 2, "initial build published baseline graph");
 
   // Add a new source file, then `update .` must rescan and grow the graph.
   write_file(root / "src" / "beta.ts", "export function beta() { return alpha(); }\n");
   const auto update = request_with_retry(socket_path, cgraph::make_request("update", {{"path", "."}}));
-  ok = ok && update && (*update)["ok"] == true && (*update)["result"]["full_rescan"] == true;
+  expect(ok, update && (*update)["ok"] == true && (*update)["result"]["full_rescan"] == true, "update op full rescan");
   const auto nodes_after = update ? (*update)["result"].value("node_count", 0) : 0;
-  ok = ok && nodes_after > nodes_before;
+  expect(ok, nodes_after > nodes_before, "update grew the graph");
 
   // The newly-added symbol is now queryable on the resident daemon.
   const auto query = request_with_retry(socket_path, cgraph::make_request("query", {{"q", "beta"}}));
-  ok = ok && query && (*query)["ok"] == true && !(*query)["result"]["nodes"].empty();
+  expect(ok, query && (*query)["ok"] == true && !(*query)["result"]["nodes"].empty(), "added symbol queryable");
 
   // Semantic enrichment: drop a valid fragment into the daemon's drop dir and
   // the watcher must merge it into the live snapshot (no update op issued).
@@ -96,9 +111,9 @@ int main() {
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
   }
-  ok = ok && enriched;
+  expect(ok, enriched, "valid fragment merged into live snapshot");
   const auto topic = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("query", {{"q", "Topic"}}));
-  ok = ok && topic && !(*topic)["result"]["nodes"].empty();
+  expect(ok, topic && !(*topic)["result"]["nodes"].empty(), "enriched concept queryable");
 
   // A malformed fragment is rejected: enrichment_state goes failed, graph unchanged.
   write_file(root / "cgraph-out" / "semantic-drop" / "chunk_01.json", R"({"nodes":[{"id":"x"}],"edges":[]})");
@@ -113,16 +128,105 @@ int main() {
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
   }
-  ok = ok && failed_seen && nodes_at_fail == nodes_pre_enrich + 2;  // bad fragment added nothing
+  expect(ok, failed_seen && nodes_at_fail == nodes_pre_enrich + 2, "malformed fragment rejected, graph unchanged");
+
+  // Live watching: a new source file lands in the graph with NO update op. The
+  // gitignored peer (written first, same watch window) must never enter.
+  write_file(root / ".gitignore", "scratch\n");
+  write_file(root / "scratch" / "hidden.ts", "export function hidden() { return 0; }\n");
+  write_file(root / "src" / "gamma.ts", "export function gamma() { return 2; }\n");
+  bool watched = false;
+  for (int attempt = 0; attempt < 600 && !watched; ++attempt) {
+    const auto q = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("query", {{"q", "gamma"}}));
+    watched = q && !(*q)["result"]["nodes"].empty();
+    if (!watched) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+  expect(ok, watched, "live watcher picked up new file without update op");
+
+  // status reports the watcher and counts the applied update.
+  const auto watch_status = request_with_retry(socket_path, cgraph::make_request("status"));
+  expect(ok,
+         watch_status && (*watch_status)["result"].value("watching", false) &&
+             (*watch_status)["result"].value("incremental_updates", 0) >= 1,
+         "status reports watcher and applied update");
+
+  // The semantic overlay survives the code-only incremental rebuild (fragments
+  // are re-overlaid after the rebuild publishes).
+  bool overlay_kept = false;
+  for (int attempt = 0; attempt < 200 && !overlay_kept; ++attempt) {
+    const auto q = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("query", {{"q", "Topic"}}));
+    overlay_kept = q && !(*q)["result"]["nodes"].empty();
+    if (!overlay_kept) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+  expect(ok, overlay_kept, "semantic overlay survived incremental rebuild");
+
+  // The gitignored file never entered the graph (gamma arriving proves the same
+  // watch window was processed).
+  const auto hidden = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("query", {{"q", "hidden"}}));
+  expect(ok, hidden && (*hidden)["result"]["nodes"].empty(), "gitignored file never entered the graph");
+
+  // Incremental state is re-persisted: graph.json on disk gains the new symbol
+  // once the persist interval elapses (no update op, no shutdown).
+  bool persisted = false;
+  for (int attempt = 0; attempt < 600 && !persisted; ++attempt) {
+    std::ifstream input(root / "cgraph-out" / "graph.json");
+    const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    persisted = contents.find("gamma") != std::string::npos;
+    if (!persisted) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+  expect(ok, persisted, "incremental state re-persisted to graph.json");
 
   // An unknown op is an error, not a crash; shutdown stops the loop cleanly.
   const auto bad = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("nonsense"));
-  ok = ok && bad && (*bad)["ok"] == false;
+  expect(ok, bad && (*bad)["ok"] == false, "unknown op rejected");
+  const int nodes_at_shutdown =
+      watch_status ? (*watch_status)["result"].value("node_count", 0) : 0;
   const auto shutdown = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("shutdown"));
-  ok = ok && shutdown && (*shutdown)["ok"] == true;
+  expect(ok, shutdown && (*shutdown)["ok"] == true, "shutdown accepted");
 
   server.join();
-  ok = ok && server_rc == 0;
+  expect(ok, server_rc == 0, "first server exited cleanly");
+
+  // Restart on the same root: the daemon fast-loads the persisted graph, so the
+  // extraction index is NOT hydrated. The first live edit must trigger a
+  // hydrating full rescan — a per-file rebuild here would collapse the graph to
+  // just the changed file (regression coverage for exactly that bug).
+  int server2_rc = -1;
+  std::thread server2([&] { server2_rc = cgraph::run_daemon_server(root, options); });
+  int nodes_loaded = 0;
+  for (int attempt = 0; attempt < 600 && nodes_loaded < nodes_at_shutdown; ++attempt) {
+    const auto s = request_with_retry(socket_path, cgraph::make_request("status"));
+    nodes_loaded = s ? (*s)["result"].value("node_count", 0) : 0;
+    if (nodes_loaded < nodes_at_shutdown) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+  expect(ok, nodes_loaded >= nodes_at_shutdown, "fast-load restored the full graph");
+
+  write_file(root / "src" / "delta.ts", "export function delta() { return 3; }\n");
+  bool delta_seen = false;
+  for (int attempt = 0; attempt < 600 && !delta_seen; ++attempt) {
+    const auto q = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("query", {{"q", "delta"}}));
+    delta_seen = q && !(*q)["result"]["nodes"].empty();
+    if (!delta_seen) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+  expect(ok, delta_seen, "first edit after fast-load picked up live");
+  const auto post_edit = request_with_retry(socket_path, cgraph::make_request("status"));
+  const int nodes_post_edit = post_edit ? (*post_edit)["result"].value("node_count", 0) : 0;
+  expect(ok, nodes_post_edit > nodes_at_shutdown, "post-restart edit grew the graph (no collapse)");
+
+  const auto shutdown2 = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("shutdown"));
+  expect(ok, shutdown2 && (*shutdown2)["ok"] == true, "second shutdown accepted");
+  server2.join();
+  expect(ok, server2_rc == 0, "second server exited cleanly");
 
   fs::remove_all(root);
   return ok ? 0 : 1;

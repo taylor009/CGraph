@@ -11,7 +11,7 @@
 namespace {
 
 void print_usage() {
-  std::cout << "Usage: graphd [--root PATH] [--idle-timeout SECONDS] [--version]\n"
+  std::cout << "Usage: graphd [--root PATH] [--idle-timeout SECONDS] [--no-watch] [--version]\n"
                "             [--benchmark-query --graph PATH --query TEXT]\n";
 }
 
@@ -23,6 +23,7 @@ int main(int argc, char** argv) {
   std::filesystem::path root;
   std::string query;
   bool benchmark_query = false;
+  bool watch = true;
   std::chrono::seconds idle_timeout{300};
 
   for (int index = 1; index < argc; ++index) {
@@ -41,6 +42,10 @@ int main(int argc, char** argv) {
     }
     if (arg == "--idle-timeout" && index + 1 < argc) {
       idle_timeout = std::chrono::seconds(std::stoll(argv[++index]));
+      continue;
+    }
+    if (arg == "--no-watch") {
+      watch = false;
       continue;
     }
     if (arg == "--benchmark-query") {
@@ -85,5 +90,8 @@ int main(int argc, char** argv) {
 
   cgraph::DaemonServerOptions options;
   options.idle_timeout = idle_timeout;
+  if (!watch) {
+    options.code_poll_interval = std::chrono::milliseconds{0};  // 0 disables live watching
+  }
   return cgraph::run_daemon_server(root, options);
 }

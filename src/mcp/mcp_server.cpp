@@ -85,13 +85,15 @@ namespace {
            {"max_depth", integer_param("neighborhood radius in hops (default 2)")}}),
       tool_schema(
           "graph_update",
-          "Rescan the project and refresh the graph after files changed (only re-extracts what "
-          "changed). Blocks until the rescan finishes.",
+          "Force an immediate full rescan of the project. Usually unnecessary: the daemon watches "
+          "the project tree and folds file changes into the graph automatically within seconds. "
+          "Blocks until the rescan finishes.",
           {{"path", string_param("project-relative path hint; \".\" rescans the whole project")}}),
       tool_schema(
           "graph_status",
           "Daemon health: node/edge counts, build_state (\"building\" means the initial graph build "
-          "is still running and query results may be empty), and semantic enrichment progress.",
+          "is still running and query results may be empty), whether live file watching is active, "
+          "and semantic enrichment progress.",
           nlohmann::json::object()),
       tool_schema("graph_shutdown", "Ask the per-project graph daemon to shut down", nlohmann::json::object()),
   });

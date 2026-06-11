@@ -25,7 +25,7 @@ grep/read calls that burn context.
 | "What does X rely on?" | `graph_impact` `{id, direction:"dependencies"}` |
 | "How does A connect to B?" | `graph_path` `{source, target}` — shortest path, with `path_nodes` briefs |
 | "Load context on X" / before editing or reviewing X | `graph_context` `{query or id, budget}` — focal node + most-relevant neighbors with snippets, packed to a token budget |
-| "Is the graph current? / I just changed files" | `graph_status`, then `graph_update {path:"."}` if stale |
+| "Is the graph current? / I just changed files" | Nothing, usually — the daemon watches the tree and folds edits in within seconds. `graph_update {path:"."}` forces an immediate full rescan. |
 
 ## How to use the results
 
@@ -58,8 +58,10 @@ grep/read calls that burn context.
 - While that first build runs, results carry `"graph_state": "building"` — an
   empty result then means "not built yet", not "no match". Retry after a few
   seconds or poll `graph_status` until `build_state` is `"ready"`.
-- After editing source, a `graph_update {path:"."}` rescan refreshes the graph;
-  `graph_status` shows node/edge counts and freshness.
+- The daemon watches the project tree (`graph_status` reports `watching`): file
+  edits land in the graph automatically within a few seconds, and the graph is
+  re-persisted in the background. You only need `graph_update {path:"."}` to
+  force an immediate, fully-reconciled rescan.
 - Fall back to grep/read only when cgraph genuinely has no answer — e.g. a
   string literal, a comment, a config value, or a file type cgraph does not
   extract. For symbols and their relationships, prefer the graph.

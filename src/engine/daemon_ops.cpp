@@ -817,6 +817,8 @@ struct Snippet {
       {"enrichment_running", state.enrichment_running},
       {"enrichment_stale", state.enrichment_stale},
       {"enrichment_failed", state.enrichment_failed},
+      {"watching", state.watching},
+      {"incremental_updates", state.incremental_updates},
   };
 }
 

@@ -93,8 +93,13 @@ void record_daemon_activity(DaemonLifecycleState& lifecycle, DaemonClock::time_p
 }
 
 void mark_graph_dirty(DaemonLifecycleState& lifecycle, DaemonClock::time_point now) {
+  // dirty_since anchors to the FIRST unpersisted change: re-marking on every
+  // subsequent edit must not push the persist deadline out, or a steady edit
+  // stream would starve persistence indefinitely.
+  if (!lifecycle.graph_dirty) {
+    lifecycle.dirty_since = now;
+  }
   lifecycle.graph_dirty = true;
-  lifecycle.dirty_since = now;
 }
 
 bool should_shutdown_for_idle(

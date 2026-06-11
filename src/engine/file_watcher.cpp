@@ -1,6 +1,7 @@
 #include "cgraph/file_watcher.hpp"
 
 #include "cgraph/detect.hpp"
+#include "cgraph/path_ignore.hpp"
 
 #include <algorithm>
 #include <string>
@@ -18,27 +19,6 @@ namespace {
     return static_cast<char>(ch);
   });
   return value;
-}
-
-[[nodiscard]] bool is_skipped_directory(std::string_view name) {
-  static const std::unordered_set<std::string_view> skipped = {
-      ".git",
-      ".hg",
-      ".svn",
-      ".cache",
-      ".idea",
-      ".vscode",
-      "build",
-      "cmake-build-debug",
-      "cmake-build-release",
-      "dist",
-      "node_modules",
-      "target",
-      "vendor",
-      "cgraph-out",
-      "graphify-out",
-  };
-  return skipped.contains(name);
 }
 
 [[nodiscard]] bool is_document_extension(std::string_view extension) {
@@ -79,8 +59,13 @@ namespace {
   return path.lexically_normal().generic_string();
 }
 
+// Walk the watched tree with the same ignore rules as detect_project_files
+// (shared skip-list + root .gitignore), so the watcher never emits an event for
+// a file the deterministic pipeline would not index — otherwise an incremental
+// update could add nodes a full rescan later drops.
 [[nodiscard]] std::unordered_map<std::string, FileWatcher::FileState> scan_files(const std::filesystem::path& root) {
   std::unordered_map<std::string, FileWatcher::FileState> files;
+  const auto gitignore_patterns = read_root_gitignore(root);
   std::error_code error;
   std::filesystem::recursive_directory_iterator iterator(
       root,
@@ -92,12 +77,15 @@ namespace {
     const auto& entry = *iterator;
     const auto name = entry.path().filename().generic_string();
     if (entry.is_directory(error)) {
-      if (is_skipped_directory(name)) {
+      if (is_skipped_directory(name) || matches_simple_gitignore(root, entry.path(), gitignore_patterns)) {
         iterator.disable_recursion_pending();
       }
       continue;
     }
     if (!entry.is_regular_file(error) || !is_watchable_file(entry.path())) {
+      continue;
+    }
+    if (matches_simple_gitignore(root, entry.path(), gitignore_patterns)) {
       continue;
     }
 

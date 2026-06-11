@@ -19,6 +19,20 @@ struct DaemonServerOptions {
   std::filesystem::path drop_dir;
   // How often the serve loop polls the drop directory for new fragments.
   std::chrono::milliseconds drop_poll_interval{200};
+  // Live code watching: poll the project tree for changed source files and fold
+  // them into the graph incrementally, no `update` op needed. Each poll walks
+  // the tree (real cost on a large repo), so it runs on its own, slower cadence
+  // than the drop poll. 0 disables watching. Watching only starts once the
+  // initial build has published a baseline graph.
+  std::chrono::milliseconds code_poll_interval{2000};
+  // A save burst on one file coalesces into a single event.
+  std::chrono::milliseconds watch_debounce{250};
+  // More pending file events than this collapse into one full rescan (e.g. a
+  // git checkout or branch switch touching hundreds of files).
+  std::size_t watch_max_pending = 256;
+  // How long incremental graph changes may stay memory-only before the serve
+  // loop re-persists graph.json + the index manifest (crash/restart safety).
+  std::chrono::seconds persist_interval{30};
 };
 
 // Runs the per-project daemon: builds the deterministic graph for `root`, binds
