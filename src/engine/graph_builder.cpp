@@ -289,6 +289,11 @@ void resolve_raw_calls(GraphSnapshot& graph, std::span<const RawCall> raw_calls)
   // resolves to no single target.
   std::unordered_map<std::string, std::unordered_map<std::string, std::string>> local_by_file;
   std::unordered_map<std::string, std::string> label_by_id;
+  // Cache make_id(source_file) per distinct source path. The confidence grading
+  // below re-normalizes caller/callee file paths per raw call (hundreds of
+  // thousands of calls over a few thousand distinct files); memoizing keeps the
+  // result byte-identical while collapsing the redundant utf8proc work.
+  std::unordered_map<std::string, std::string> file_id_by_source;
   for (const auto& node : graph.nodes) {
     node_ids.insert(node.id);
     source_file_by_id.emplace(node.id, node.source_file);
@@ -296,6 +301,7 @@ void resolve_raw_calls(GraphSnapshot& graph, std::span<const RawCall> raw_calls)
     if (node.source_file.empty()) {
       continue;
     }
+    file_id_by_source.try_emplace(node.source_file, std::string{});
     if (node.kind != "function" && node.kind != "class" && node.kind != "type" && node.kind != "variable") {
       continue;
     }
@@ -305,6 +311,29 @@ void resolve_raw_calls(GraphSnapshot& graph, std::span<const RawCall> raw_calls)
       slot->second.clear();  // ambiguous within the file
     }
   }
+  // Resolve make_id(source_file) through the cache, computing lazily on first use.
+  const auto file_id_for = [&](const std::string& source_file) -> const std::string& {
+    auto it = file_id_by_source.find(source_file);
+    if (it == file_id_by_source.end()) {
+      it = file_id_by_source.emplace(source_file, make_id(source_file)).first;
+    } else if (it->second.empty() && !source_file.empty()) {
+      it->second = make_id(source_file);
+    }
+    return it->second;
+  };
+
+  // Memoize make_id(callee_label): the same callee name recurs across many calls
+  // (every invocation of the same function), so normalizing it once per distinct
+  // label removes the bulk of the per-call utf8proc work while keeping the key
+  // byte-identical to the original make_id(callee_label).
+  std::unordered_map<std::string, std::string> callee_key_cache;
+  const auto callee_key_for = [&](const std::string& label) -> const std::string& {
+    auto it = callee_key_cache.find(label);
+    if (it == callee_key_cache.end()) {
+      it = callee_key_cache.emplace(label, make_id(label)).first;
+    }
+    return it->second;
+  };
 
   // Import evidence per caller file id: the set of symbol targets it imports and
   // the set of module (file) targets it imports from. This only grades the
@@ -341,7 +370,7 @@ void resolve_raw_calls(GraphSnapshot& graph, std::span<const RawCall> raw_calls)
     if (raw_call.caller_id.empty() || !node_ids.contains(raw_call.caller_id)) {
       continue;
     }
-    const auto key = make_id(raw_call.callee_label);
+    const auto& key = callee_key_for(raw_call.callee_label);
     const auto& caller_file = source_file_by_id[raw_call.caller_id];
 
     std::string target_id;
@@ -368,8 +397,8 @@ void resolve_raw_calls(GraphSnapshot& graph, std::span<const RawCall> raw_calls)
       target_id = targets->second.front();
       // Grade confidence: EXTRACTED when the caller's file actually imports the
       // resolved symbol or its module, INFERRED when it is only a name match.
-      const auto caller_file_id = make_id(caller_file);
-      const auto callee_file_id = make_id(source_file_by_id[target_id]);
+      const auto& caller_file_id = file_id_for(caller_file);
+      const auto& callee_file_id = file_id_for(source_file_by_id[target_id]);
       const auto symbols = imported_symbols.find(caller_file_id);
       const auto modules = imported_modules.find(caller_file_id);
       const bool has_import_evidence =
@@ -458,15 +487,33 @@ void resolve_raw_relations(GraphSnapshot& graph, std::span<const RawRelation> ra
     seen_edges.insert(edge_key(edge));
   }
 
+  // Memoize make_id of the recurring per-relation strings (target type names and
+  // source paths both repeat heavily across relations). Each memo returns the
+  // exact value the inline make_id call produced, so resolution is unchanged.
+  std::unordered_map<std::string, std::string> target_key_cache;
+  std::unordered_map<std::string, std::string> source_file_id_cache;
+  const auto memo = [](std::unordered_map<std::string, std::string>& cache,
+                       const std::string& s) -> const std::string& {
+    auto it = cache.find(s);
+    if (it == cache.end()) {
+      it = cache.emplace(s, make_id(s)).first;
+    }
+    return it->second;
+  };
+
   for (const auto& relation : raw_relations) {
     if (relation.source_id.empty() || relation.target_label.empty() || !node_ids.contains(relation.source_id)) {
       continue;
     }
-    const auto key = make_id(relation.target_label);
+    const auto& key = memo(target_key_cache, relation.target_label);
+    // make_id(relation.source_file) was computed twice per relation below; the
+    // file-id lookups (imported_by_file / included_files_by_file) are both keyed
+    // by it, so normalize the source path once and reuse the result.
+    const auto& source_file_id = memo(source_file_id_cache, relation.source_file);
 
     std::string target_id;
     // 1. The type the source file imports (the canonical resolution path).
-    if (const auto file = imported_by_file.find(make_id(relation.source_file)); file != imported_by_file.end()) {
+    if (const auto file = imported_by_file.find(source_file_id); file != imported_by_file.end()) {
       if (const auto slot = file->second.find(key); slot != file->second.end()) {
         target_id = slot->second;
       }
@@ -474,7 +521,7 @@ void resolve_raw_relations(GraphSnapshot& graph, std::span<const RawRelation> ra
     // 1b. The type is declared in a file the source file #includes (C/C++
     //     whole-file import). Resolve against declarations in each included file.
     if (target_id.empty()) {
-      if (const auto inc = included_files_by_file.find(make_id(relation.source_file)); inc != included_files_by_file.end()) {
+      if (const auto inc = included_files_by_file.find(source_file_id); inc != included_files_by_file.end()) {
         for (const auto& included_source : inc->second) {
           const auto file = local_by_file.find(included_source);
           if (file == local_by_file.end()) {
