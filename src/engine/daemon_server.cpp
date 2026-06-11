@@ -18,6 +18,7 @@
 #include <unordered_map>
 
 #include <array>
+#include <condition_variable>
 #include <cstring>
 #include <iostream>
 #include <mutex>
@@ -182,22 +183,47 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   SemanticCache cache = read_semantic_cache(cache_path);
   SemanticFragmentDropWatcher drop_watcher(drop_dir);
 
-  const auto refresh_enrichment_state = [&]() {
+  // Enrichment planning (plan_semantic_chunks) walks the whole project and
+  // hashes every doc/media file — seconds on a large repo. It only produces
+  // informational status counts, so it must not block the build/update response.
+  // It runs on a dedicated worker: callers signal request_refresh() (cheap) and
+  // return; the worker snapshots the cache under graph_mutex, plans OFF-lock
+  // (never blocking builds), then writes the counts back under graph_mutex.
+  std::mutex refresh_mutex;
+  std::condition_variable refresh_cv;
+  bool refresh_requested = false;
+  bool refresh_stop = false;
+
+  const auto run_enrichment_refresh = [&]() {
+    SemanticCache snapshot;
+    {
+      const std::scoped_lock lock(graph_mutex);
+      snapshot = cache;  // quick copy; release before the slow walk
+    }
     SemanticChunkPlanOptions plan_options;
     plan_options.excluded_dirs = {drop_dir};
     if (drop_dir.has_parent_path()) {
       plan_options.excluded_dirs.push_back(drop_dir.parent_path());
     }
-    const auto plan = plan_semantic_chunks(identity.project_root, cache, plan_options);
+    const auto plan = plan_semantic_chunks(identity.project_root, snapshot, plan_options);
     std::size_t pending = 0;
     for (const auto& chunk : plan.chunks) {
       pending += chunk.inputs.size();
     }
+    const std::scoped_lock lock(graph_mutex);
     state.enrichment_pending = pending;
     state.enrichment_stale = plan.stale_inputs;
     state.enrichment_state = state.enrichment_failed > 0  ? EnrichmentState::Failed
                              : pending > 0                ? EnrichmentState::Pending
                                                           : EnrichmentState::Idle;
+  };
+
+  const auto request_refresh = [&]() {
+    {
+      const std::scoped_lock lock(refresh_mutex);
+      refresh_requested = true;
+    }
+    refresh_cv.notify_one();
   };
 
   // Merges one dropped fragment, caching it against its manifest source(s).
@@ -272,7 +298,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     // enrichment planning, which walks the whole project and can take seconds on
     // a large repo. The Tier-1 cache should land promptly, not behind planning.
     persist_graph_and_manifest();
-    refresh_enrichment_state();
+    request_refresh();
     const auto graph = read_graph_snapshot(state);
     return nlohmann::json{
         {"accepted", true},
@@ -305,7 +331,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     // Log the fast-path load immediately — before enrichment planning, which
     // walks the whole project and can take seconds.
     std::cerr << "graphd: loaded persisted graph (" << detected.size() << " files unchanged)\n";
-    refresh_enrichment_state();
+    request_refresh();
     return true;
   };
   state.update_handler = [&](const nlohmann::json&) { return rescan(); };
@@ -321,6 +347,23 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
       }
     });
   }
+
+  // Enrichment-refresh worker: coalesces refresh requests (many builds/drops in a
+  // burst trigger one re-plan) and runs the slow walk off the build/serve path.
+  std::thread enrichment_worker([&] {
+    for (;;) {
+      {
+        std::unique_lock<std::mutex> lock(refresh_mutex);
+        refresh_cv.wait(lock, [&] { return refresh_requested || refresh_stop; });
+        if (refresh_stop) {
+          return;
+        }
+        refresh_requested = false;
+      }
+      run_enrichment_refresh();
+    }
+  });
+
   (void)drop_watcher.poll(FileWatcherClock::now());  // prime: existing drops are already overlaid
 
   std::cerr << "graphd listening on " << socket_path << " for root " << identity.project_root << '\n';
@@ -359,7 +402,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
       if (merged_any) {
         write_semantic_cache(cache, cache_path);
       }
-      refresh_enrichment_state();
+      request_refresh();
     }
 
     if (ready == 0) {
@@ -389,6 +432,12 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   if (build_thread.joinable()) {
     build_thread.join();  // captures locals by reference: join before they leave scope
   }
+  {
+    const std::scoped_lock lock(refresh_mutex);
+    refresh_stop = true;
+  }
+  refresh_cv.notify_one();
+  enrichment_worker.join();  // also captures locals by reference; join before scope exit
   ::close(listen_fd);
   (void)cleanup_daemon_endpoint(socket_path);
   return 0;
