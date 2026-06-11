@@ -111,6 +111,31 @@ std::string export_graph_html(const GraphSnapshot& graph) {
 <title>cgraph</title>
 <style>
   :root {
+    /* Dark by default to match the Graphify viewer's signature look (it is
+       dark-only); light remains available via the toggle below. */
+    color-scheme: dark;
+    --bg: #0f0f1a;
+    --panel: #1a1a2e;
+    --ink: #e0e0e0;
+    --muted: #888888;
+    --line: #2a2a4e;
+    --edge: #3a3a5e;
+    --accent: #4E79A7;
+    --class: #4E79A7;
+    --function: #59A14F;
+    --other: #B07AA1;
+    --focus: #EDC948;
+    /* Graph canvas colors are variables so light/dark theming flows through to
+       the canvas, which cannot inherit CSS the way DOM nodes do. */
+    --canvas-bg: #0f0f1a;
+    --graph-text: #ffffff;
+    --graph-edge: #5a6282;
+    --node-stroke: #0f0f1a;
+  }
+  /* Light is opt-in via the toggle only. Dark stays the default unconditionally
+     (not OS-dependent) so the viewer always opens in the Graphify look — the
+     reference viewer is dark-only. */
+  :root[data-theme="light"] {
     color-scheme: light;
     --bg: #f6f7f9;
     --panel: #ffffff;
@@ -118,45 +143,11 @@ std::string export_graph_html(const GraphSnapshot& graph) {
     --muted: #667085;
     --line: #d7dde5;
     --edge: #9aa6b2;
-    --class: #2563eb;
-    --function: #059669;
-    --other: #7c3aed;
-    --focus: #f59e0b;
-    /* Graph canvas colors are variables so light/dark theming flows through to
-       the canvas, which cannot inherit CSS the way DOM nodes do. */
+    --accent: #4E79A7;
     --canvas-bg: #fbfcfd;
     --graph-text: #111827;
     --graph-edge: #9aa6b2;
     --node-stroke: #ffffff;
-  }
-  :root[data-theme="dark"] {
-    color-scheme: dark;
-    --bg: #0d1117;
-    --panel: #161b22;
-    --ink: #e6edf3;
-    --muted: #8b949e;
-    --line: #30363d;
-    --edge: #3d444d;
-    --canvas-bg: #0d1117;
-    --graph-text: #e6edf3;
-    --graph-edge: #48505a;
-    --node-stroke: #0d1117;
-  }
-  /* Honor the OS preference on first load when the user has not chosen. */
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      color-scheme: dark;
-      --bg: #0d1117;
-      --panel: #161b22;
-      --ink: #e6edf3;
-      --muted: #8b949e;
-      --line: #30363d;
-      --edge: #3d444d;
-      --canvas-bg: #0d1117;
-      --graph-text: #e6edf3;
-      --graph-edge: #48505a;
-      --node-stroke: #0d1117;
-    }
   }
   * { box-sizing: border-box; }
   body {
@@ -165,39 +156,17 @@ std::string export_graph_html(const GraphSnapshot& graph) {
     color: var(--ink);
     background: var(--bg);
   }
+  /* Full-bleed canvas + fixed right sidebar, matching the Graphify viewer's
+     chrome-less layout (no top header bar). */
   .shell {
-    min-height: 100vh;
-    display: grid;
-    grid-template-rows: auto 1fr;
-  }
-  header {
+    height: 100vh;
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--line);
-    background: var(--panel);
-  }
-  h1 {
-    margin: 0;
-    font-size: 18px;
-    font-weight: 650;
-  }
-  .stats {
-    display: flex;
-    gap: 14px;
-    color: var(--muted);
-    white-space: nowrap;
-  }
-  main {
-    min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 320px;
+    overflow: hidden;
   }
   .stage {
     position: relative;
-    min-height: 620px;
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
   }
   #graph-canvas {
@@ -211,65 +180,17 @@ std::string export_graph_html(const GraphSnapshot& graph) {
   #graph-canvas:active {
     cursor: grabbing;
   }
+  /* Subtle, low-key on-canvas chrome so the graph reads first (Graphify keeps
+     the canvas clean; these stay out of the way). */
   .hint {
     position: absolute;
     left: 14px;
     bottom: 12px;
     color: var(--muted);
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 6px 8px;
-    font-size: 12px;
-  }
-  .legend {
-    position: absolute;
-    left: 14px;
-    top: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    color: var(--muted);
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 8px 10px;
-    font-size: 12px;
-    max-height: 46vh;
-    overflow-y: auto;
-  }
-  .legend .row {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-  }
-  .legend .head {
-    font-weight: 600;
-    color: var(--ink);
-    margin-bottom: 2px;
-  }
-  .legend .lbl {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 168px;
-  }
-  .legend .count {
-    margin-left: auto;
-    padding-left: 10px;
     opacity: 0.6;
-    font-variant-numeric: tabular-nums;
-  }
-  .legend .foot {
-    margin-top: 6px;
-    padding-top: 6px;
-    border-top: 1px solid var(--line);
-  }
-  .legend .dot {
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-    flex: none;
+    font-size: 12px;
+    max-width: 60%;
+    pointer-events: none;
   }
   .controls {
     position: absolute;
@@ -280,51 +201,127 @@ std::string export_graph_html(const GraphSnapshot& graph) {
   }
   .control-btn {
     border: 1px solid var(--line);
-    background: var(--panel);
-    color: var(--ink);
+    background: rgba(26, 26, 46, 0.7);
+    color: var(--muted);
     border-radius: 6px;
-    padding: 6px 10px;
+    padding: 5px 9px;
     font: inherit;
     font-size: 12px;
     cursor: pointer;
   }
   .control-btn:hover {
-    background: var(--bg);
+    color: var(--ink);
+    border-color: var(--accent);
   }
+  /* Right sidebar: Search -> Node Info -> Communities -> stats footer, 280px,
+     matching the Graphify layout. */
   aside {
-    min-height: 0;
+    width: 280px;
+    flex-shrink: 0;
     border-left: 1px solid var(--line);
     background: var(--panel);
-    display: grid;
-    grid-template-rows: auto 1fr;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
-  .tools {
-    padding: 14px;
+  .search-wrap {
+    padding: 12px;
     border-bottom: 1px solid var(--line);
-  }
-  label {
-    display: block;
-    margin-bottom: 6px;
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 600;
   }
   input {
     width: 100%;
     min-width: 0;
-    border: 1px solid var(--line);
+    background: var(--bg);
+    border: 1px solid var(--edge);
     border-radius: 6px;
-    padding: 9px 10px;
+    padding: 7px 10px;
     font: inherit;
+    font-size: 13px;
+    color: var(--ink);
+    outline: none;
+  }
+  input:focus {
+    border-color: var(--accent);
+  }
+  .info-panel {
+    padding: 14px;
+    border-bottom: 1px solid var(--line);
+    min-height: 120px;
+  }
+  .panel-head {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 0 0 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
   }
   #node-details {
     min-width: 0;
     overflow: auto;
-    padding: 14px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .legend-wrap {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+  }
+  .legend {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    color: var(--ink);
+    font-size: 12px;
+  }
+  .legend .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    border-radius: 4px;
+  }
+  .legend .legend-item:hover {
+    background: var(--line);
+    padding-left: 4px;
+  }
+  .legend .lbl {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .legend .count {
+    margin-left: auto;
+    padding-left: 10px;
+    color: var(--muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .legend .foot {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+  }
+  .legend .dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex: none;
+  }
+  .stats {
+    padding: 10px 14px;
+    border-top: 1px solid var(--line);
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .detail-title {
     margin: 0 0 6px;
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 650;
     overflow-wrap: anywhere;
   }
@@ -334,7 +331,7 @@ std::string export_graph_html(const GraphSnapshot& graph) {
     color: var(--muted);
   }
   .field {
-    margin: 12px 0;
+    margin: 8px 0;
   }
   .field strong {
     display: block;
@@ -346,57 +343,53 @@ std::string export_graph_html(const GraphSnapshot& graph) {
     display: block;
     overflow-wrap: anywhere;
     white-space: normal;
+    color: var(--ink);
   }
   .empty {
     color: var(--muted);
+    font-style: italic;
   }
   @media (max-width: 840px) {
-    main {
-      grid-template-columns: 1fr;
-      grid-template-rows: minmax(520px, 60vh) auto;
+    .shell {
+      flex-direction: column;
     }
     aside {
+      width: auto;
       border-left: 0;
       border-top: 1px solid var(--line);
-    }
-    header {
-      align-items: flex-start;
-      flex-direction: column;
     }
   }
 </style>
 </head>
 <body>
 <div class="shell">
-<header>
-  <h1>cgraph</h1>
-  <div class="stats">
-)html";
-  output << "    <span>Nodes: " << graph.nodes.size() << "</span>\n";
-  output << "    <span>Edges: " << graph.edges.size() << "</span>\n";
-  output << R"html(  </div>
-</header>
-<main>
   <section class="stage" aria-label="Graph visualization">
     <canvas id="graph-canvas" aria-label="Interactive graph visualization"></canvas>
-    <div class="legend" id="legend" aria-label="Community color key"></div>
     <div class="controls">
       <button type="button" class="control-btn" id="fit-view">Fit to screen</button>
       <button type="button" class="control-btn" id="reset-view">Reset view</button>
-      <button type="button" class="control-btn" id="theme-toggle" aria-pressed="false">Dark</button>
+      <button type="button" class="control-btn" id="theme-toggle" aria-pressed="false">Light</button>
     </div>
-    <div class="hint">Drag a node to rearrange. Scroll to zoom, drag canvas to pan. Click a node for details. Esc or click empty space to clear.</div>
+    <div class="hint">Drag a node to rearrange. Scroll to zoom, drag to pan. Click a node for details. Esc clears.</div>
   </section>
-  <aside>
-    <div class="tools">
-      <label for="search">Search nodes</label>
-      <input id="search" type="search" placeholder="Search nodes">
+  <aside aria-label="Graph tools">
+    <div class="search-wrap">
+      <input id="search" type="search" placeholder="Search nodes..." autocomplete="off">
     </div>
-    <div id="node-details">
-      <p class="empty">Select a node to inspect its source, id, and neighbors.</p>
+    <div class="info-panel">
+      <h3 class="panel-head">Node Info</h3>
+      <div id="node-details">
+        <p class="empty">Click a node to inspect its source, id, and neighbors.</p>
+      </div>
     </div>
-  </aside>
-</main>
+    <div class="legend-wrap">
+      <h3 class="panel-head">Communities</h3>
+      <div class="legend" id="legend" aria-label="Community color key"></div>
+    </div>
+)html";
+  output << "    <div class=\"stats\" id=\"stats\">" << graph.nodes.size() << " nodes &middot; "
+         << graph.edges.size() << " edges</div>\n";
+  output << R"html(  </aside>
 </div>
 <script>
 )html";
@@ -413,14 +406,14 @@ const nodes = graphData.nodes.map((node, index) => ({...node, index}));
 const links = graphData.links || [];
 const nodeById = new Map(nodes.map(node => [node.id, node]));
 const palette = {
-  class: "#2563eb",
-  function: "#059669",
-  other: "#7c3aed",
-  edge: "#9aa6b2",
-  text: "#111827",
-  muted: "#667085",
-  focus: "#f59e0b",
-  nodeStroke: "#ffffff"
+  class: "#4E79A7",
+  function: "#59A14F",
+  other: "#B07AA1",
+  edge: "#5a6282",
+  text: "#ffffff",
+  muted: "#888888",
+  focus: "#EDC948",
+  nodeStroke: "#0f0f1a"
 };
 
 // The canvas cannot inherit CSS, so pull the theme-dependent colors from the
@@ -478,13 +471,20 @@ const labelBudget = new Set(
     .map(node => node.id)
 );
 
+// Largest degree in the graph, so node sizing can be normalized against the
+// busiest hub exactly like the Graphify viewer (radius 5..20 over [0, maxDeg]).
+let maxDegree = 1;
+for (const value of degree.values()) maxDegree = Math.max(maxDegree, value);
+
 function radiusFor(node) {
-  // Importance-weighted sizing: connected and "god" nodes read larger,
-  // matching Graphify's emphasis on hub symbols.
+  // Degree-normalized sizing in the spirit of Graphify's `size = 10 + 30*(deg/max)`,
+  // but sqrt-scaled so a single dominant hub does not squash every other node to
+  // the floor — this restores the clear hub-to-leaf size hierarchy the reference
+  // shows. "god" hubs get a small extra bump.
   const deg = degree.get(node.id) || 0;
   const god = node && node.properties && String(node.properties.god_node) === "true";
-  const base = 6 + Math.sqrt(deg) * 3.2;
-  return Math.min(22, god ? base + 4 : base);
+  const base = 5 + 17 * Math.sqrt(deg / maxDegree);
+  return Math.min(24, god ? base + 3 : base);
 }
 
 function colorFor(node) {
@@ -503,11 +503,11 @@ function colorFor(node) {
   return palette.other;
 }
 
-// Distinct, evenly-spread hues so adjacent communities are easy to tell apart.
+// Tableau 10 — the exact community palette the Graphify viewer uses, so
+// clusters read with the same colors across both tools.
 const communityPalette = [
-  "#2563eb", "#059669", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2",
-  "#db2777", "#65a30d", "#ea580c", "#0d9488", "#9333ea", "#ca8a04",
-  "#e11d48", "#16a34a", "#4f46e5", "#c026d3", "#0284c7", "#84cc16"
+  "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F",
+  "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC"
 ];
 
 function shortLabel(value) {
@@ -556,12 +556,17 @@ function layout() {
   // the interior. This makes the computed community structure spatially visible
   // instead of relaxing into one uniform frame-filling cloud.
   const communityCount = Math.max(communityOrder.length, 1);
-  const ringRadius = Math.min(sim.width, sim.height) * 0.38;
+  // Seed communities on a wide ellipse that tracks the (typically 16:9) canvas
+  // aspect, so clusters spread into 2D islands that fill the frame instead of
+  // collapsing into a tall vertical spine. Weak global gravity (simulationTick)
+  // then keeps them on-screen without pulling them back into a line.
+  const ringRadiusX = sim.width * 0.34;
+  const ringRadiusY = sim.height * 0.34;
   for (const node of nodes) {
     const slot = communityIndex.get(node.community) || 0;
     const angle = (slot / communityCount) * 2 * Math.PI;
-    const anchorX = centerX + ringRadius * Math.cos(angle);
-    const anchorY = centerY + ringRadius * Math.sin(angle);
+    const anchorX = centerX + ringRadiusX * Math.cos(angle);
+    const anchorY = centerY + ringRadiusY * Math.sin(angle);
     const spread = sim.k * 2.2;
     node.x = anchorX + (seededUnit(node.index + 1) - 0.5) * spread;
     node.y = anchorY + (seededUnit(node.index + 13) - 0.5) * spread;
@@ -632,15 +637,15 @@ function simulationTick() {
   for (const node of nodes) {
     const acc = communityCentroid.get(node.community);
     if (acc) {
-      node.dx += (acc.x - node.x) * 0.12;
-      node.dy += (acc.y - node.y) * 0.12;
+      node.dx += (acc.x - node.x) * 0.18;
+      node.dy += (acc.y - node.y) * 0.18;
     }
   }
-  // Weak global gravity keeps the whole layout roughly centered without
-  // collapsing the separated communities back into one blob.
+  // Very weak global gravity keeps the layout on-screen without pulling the
+  // spread-out community islands back into a central spine.
   for (const node of nodes) {
-    node.dx += (centerX - node.x) * 0.015;
-    node.dy += (centerY - node.y) * 0.015;
+    node.dx += (centerX - node.x) * 0.006;
+    node.dy += (centerY - node.y) * 0.006;
   }
   // Move each node by its net displacement, limited by the cooling temperature.
   const maxStep = k * sim.alpha;
@@ -732,9 +737,13 @@ function draw() {
     if (!source || !target) continue;
     const dim = nodeIsDim(source) || nodeIsDim(target);
     const activeEdge = activeId && highlighted.has(source.id) && highlighted.has(target.id);
-    ctx.globalAlpha = dim ? 0.1 : activeEdge ? 0.85 : 0.4;
-    ctx.strokeStyle = activeEdge ? palette.focus : palette.edge;
-    ctx.lineWidth = (activeEdge ? 2.2 : 1.4) / transform.scale;
+    // Edges inherit the source node's community color at low opacity, the same
+    // "inherit from" tint vis.js gives the Graphify viewer, so clusters read as
+    // cohesive colored regions instead of a uniform gray mesh.
+    const edgeColor = activeEdge ? palette.focus : colorFor(source);
+    ctx.globalAlpha = dim ? 0.08 : activeEdge ? 0.9 : 0.45;
+    ctx.strokeStyle = edgeColor;
+    ctx.lineWidth = (activeEdge ? 2.2 : 1.2) / transform.scale;
     // Stop the line at the target node's rim so the arrowhead sits cleanly.
     const dx = target.x - source.x;
     const dy = target.y - source.y;
@@ -756,7 +765,7 @@ function draw() {
     ctx.lineTo(tipX - head * Math.cos(ang - 0.4), tipY - head * Math.sin(ang - 0.4));
     ctx.lineTo(tipX - head * Math.cos(ang + 0.4), tipY - head * Math.sin(ang + 0.4));
     ctx.closePath();
-    ctx.fillStyle = activeEdge ? palette.focus : palette.edge;
+    ctx.fillStyle = edgeColor;
     ctx.fill();
     // Relation label only on the active node's edges, to avoid clutter.
     if (activeEdge && link.relation) {
@@ -769,6 +778,7 @@ function draw() {
 
   ctx.font = "11px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
   ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
   for (const node of nodes) {
     const dim = nodeIsDim(node);
     const selected = node.id === selectedId;
@@ -806,12 +816,14 @@ function draw() {
       zoomedIn || (searchTerm && matchesSearch(node)));
     if (labelled) {
       ctx.fillStyle = palette.text;
-      ctx.globalAlpha = dim ? 0.22 : 0.92;
-      ctx.fillText(shortLabel(node.label || node.id), node.x + r + 4, node.y + 1);
+      ctx.globalAlpha = dim ? 0.22 : 0.95;
+      // Centered just below the node, matching the Graphify viewer's labels.
+      ctx.fillText(shortLabel(node.label || node.id), node.x, node.y + r + 9);
     }
   }
   ctx.restore();
   ctx.globalAlpha = 1;
+  ctx.textAlign = "left";
 }
 
 let animationHandle = 0;
@@ -896,7 +908,9 @@ function buildLegend() {
     if ((degree.get(node.id) || 0) > (degree.get(group.rep.id) || 0)) group.rep = node;
   }
   const ordered = [...groups.values()].sort((a, b) => b.count - a.count);
-  let html = '<div class="row head">Communities (' + ordered.length + ')</div>';
+  // The "Communities" heading lives in the sidebar; rows are dot + label + count
+  // like the Graphify legend, ordered by size.
+  let html = '';
   for (const group of ordered) {
     const rep = group.rep;
     html += '<div class="row legend-item" data-node="' + escapeHtml(rep.id) + '" title="' +
@@ -907,6 +921,12 @@ function buildLegend() {
   }
   html += '<div class="row foot"><span class="dot" style="background:var(--edge)"></span>Bigger = more connected</div>';
   legend.innerHTML = html;
+  // Fold the community count into the stats footer, matching Graphify's
+  // "N nodes · M edges · K communities" summary line.
+  const statsEl = document.getElementById("stats");
+  if (statsEl && ordered.length) {
+    statsEl.innerHTML = nodes.length + " nodes · " + links.length + " edges · " + ordered.length + " communities";
+  }
   for (const item of legend.querySelectorAll(".legend-item")) {
     item.style.cursor = "pointer";
     item.addEventListener("click", () => {
@@ -1029,9 +1049,9 @@ canvas.addEventListener("wheel", event => {
 // preference once the user picks. The canvas palette is refreshed from CSS so
 // node/edge/label colors follow the theme.
 function effectiveDark() {
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr) return attr === "dark";
-  return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  // Dark is the unconditional default (matching the dark-only Graphify viewer);
+  // light is reachable only by an explicit toggle.
+  return document.documentElement.getAttribute("data-theme") !== "light";
 }
 function syncThemeButton() {
   const dark = effectiveDark();

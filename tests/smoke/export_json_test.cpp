@@ -55,11 +55,26 @@ int main() {
   }
 
   // Light/dark theme toggle: a control flips a theme attribute and the canvas
-  // colors follow CSS variables rather than hardcoded light values (group 5).
+  // colors follow CSS variables rather than hardcoded values (group 5). Light is
+  // opt-in via data-theme="light"; dark is the unconditional default.
   if (html.find("theme-toggle") == std::string::npos ||
-      html.find("data-theme") == std::string::npos ||
-      html.find("--canvas-bg") == std::string::npos ||
-      html.find("prefers-color-scheme: dark") == std::string::npos) {
+      html.find("data-theme=\"light\"") == std::string::npos ||
+      html.find("--canvas-bg") == std::string::npos) {
+    return 1;
+  }
+
+  // Graphify visual parity: dark-by-default canvas (#0f0f1a), the Tableau-10
+  // community palette, the full right sidebar (Node Info + Communities headings
+  // + stats footer), and no leftover top header bar. These pin the viewer's look
+  // to the reference so a future restyle that drifts away is caught.
+  if (html.find("--canvas-bg: #0f0f1a") == std::string::npos ||      // dark by default
+      html.find("color-scheme: dark") == std::string::npos ||
+      html.find("#4E79A7") == std::string::npos ||                   // Tableau-10 lead color
+      html.find("#F28E2B") == std::string::npos ||                   // Tableau-10 orange
+      html.find(">Node Info<") == std::string::npos ||
+      html.find(">Communities<") == std::string::npos ||
+      html.find("id=\"stats\"") == std::string::npos ||
+      html.find("<header>") != std::string::npos) {                  // header removed
     return 1;
   }
 
@@ -73,6 +88,14 @@ int main() {
   // pulls clusters together, and no Math.random is used (task group 3).
   if (html.find("communityCentroid") == std::string::npos ||
       html.find("Math.random(") != std::string::npos) {
+    return 1;
+  }
+
+  // Regression guard: nodes must relax in open world space, never clamp to the
+  // canvas walls (which previously pinned outward-pushed nodes into a dense
+  // rectangular border). The invariant is documented at the node-move step; if a
+  // future edit reintroduces a viewport clamp it has to delete this contract.
+  if (html.find("No hard wall clamp") == std::string::npos) {
     return 1;
   }
 
