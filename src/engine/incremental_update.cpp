@@ -78,15 +78,41 @@ IncrementalUpdateResult full_stat_index_rescan(
   rescanned.reserve(detected_files.size());
   rescanned_cache.reserve(detected_files.size());
 
-  // Extract all files concurrently; the index maps are keyed by file and
-  // rebuild_graph re-sorts keys, so result order does not affect the graph.
-  auto extractions = extract_files(detected_files);
-  for (std::size_t i = 0; i < detected_files.size(); ++i) {
+  // Classify every detected file against the existing index: a stat/hash hit
+  // whose extraction we already hold is reused as-is; only changed and new files
+  // are re-extracted. With an empty index (cold start) everything is "new" and we
+  // extract all; with a warm or disk-loaded index we re-extract only the delta.
+  // A reused fragment is byte-identical to re-extracting it, so the merged graph
+  // is unchanged either way.
+  std::vector<DetectedFile> to_extract;
+  for (const auto& file : detected_files) {
+    const auto key = key_for(file.path);
+    std::optional<FileCacheEntry> previous;
+    if (const auto cached = index.cache.find(key); cached != index.cache.end()) {
+      previous = cached->second;
+    }
+    const auto classification = classify_cached_file(file.path, std::move(previous));
+    if (classification.state == CacheState::Deleted || !classification.current.has_value()) {
+      continue;  // vanished between detect and classify; treat as removed
+    }
+    const bool reusable = (classification.state == CacheState::StatHit || classification.state == CacheState::HashHit);
+    if (reusable) {
+      if (const auto existing = index.files.find(key); existing != index.files.end()) {
+        rescanned.emplace(key, std::move(existing->second));
+        rescanned_cache.emplace(key, *classification.current);
+        continue;
+      }
+    }
+    rescanned_cache.emplace(key, *classification.current);
+    to_extract.push_back(file);
+  }
+
+  // Re-extract only the changed/new files, concurrently.
+  auto extractions = extract_files(to_extract);
+  for (std::size_t i = 0; i < to_extract.size(); ++i) {
     auto& extraction = extractions[i];
     result.warnings.insert(result.warnings.end(), extraction.fragment.warnings.begin(), extraction.fragment.warnings.end());
-    const auto key = key_for(detected_files[i].path);
-    rescanned_cache.emplace(key, read_file_cache_entry(detected_files[i].path));
-    rescanned.emplace(key, std::move(extraction));
+    rescanned.emplace(key_for(to_extract[i].path), std::move(extraction));
     ++result.files_reextracted;
   }
 

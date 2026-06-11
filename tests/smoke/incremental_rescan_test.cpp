@@ -98,9 +98,12 @@ int assert_explicit_rescan_replaces_stat_index() {
   std::filesystem::remove(stale);
   write_file(fresh, "class Fresh:\n    pass\n");
 
+  // A full rescan reuses unchanged files (keep.py) from the existing index and
+  // re-extracts only the new one (fresh.py): files_reextracted == 1, not 2. The
+  // resulting graph is identical to re-extracting everything.
   result = cgraph::full_stat_index_rescan(state, index, root);
   graph = cgraph::read_graph_snapshot(state);
-  if (!result.full_rescan || result.files_reextracted != 2 || result.files_removed != 1 ||
+  if (!result.full_rescan || result.files_reextracted != 1 || result.files_removed != 1 ||
       !has_node_label(*graph, "Keep") || !has_node_label(*graph, "Fresh") ||
       has_node_label(*graph, "Stale") || has_source(*graph, stale)) {
     return 1;
