@@ -59,10 +59,13 @@ namespace {
   return index;
 }
 
-[[nodiscard]] std::string json_for_script(const nlohmann::json& value) {
-  auto json = value.dump();
-  std::string output;
-  output.reserve(json.size());
+// Dump the JSON once and escape any "</" sequence (so the embedded payload
+// cannot close the surrounding <script> tag) while appending directly into the
+// caller's buffer. Appending in place avoids materializing a second full copy
+// of the multi-megabyte serialized graph.
+void append_json_for_script(std::string& output, const nlohmann::json& value) {
+  const auto json = value.dump();
+  output.reserve(output.size() + json.size());
   for (std::size_t index = 0; index < json.size(); ++index) {
     if (json[index] == '<' && index + 1 < json.size() && json[index + 1] == '/') {
       output += "<\\/";
@@ -71,7 +74,6 @@ namespace {
     }
     output.push_back(json[index]);
   }
-  return output;
 }
 
 }  // namespace
@@ -102,8 +104,12 @@ nlohmann::json to_node_link_json(const GraphSnapshot& graph) {
 }
 
 std::string export_graph_html(const GraphSnapshot& graph) {
-  std::ostringstream output;
-  output << R"html(<!doctype html>
+  std::string output;
+  // The embedded graph JSON dominates the document; pre-size generously (about
+  // 1KB/node + 0.2KB/edge plus the static shell) so the buffer grows at most
+  // once instead of reallocating its way up to tens of megabytes.
+  output.reserve(64 * 1024 + graph.nodes.size() * 1024 + graph.edges.size() * 256);
+  output += R"html(<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -372,9 +378,13 @@ std::string export_graph_html(const GraphSnapshot& graph) {
   <h1>cgraph</h1>
   <div class="stats">
 )html";
-  output << "    <span>Nodes: " << graph.nodes.size() << "</span>\n";
-  output << "    <span>Edges: " << graph.edges.size() << "</span>\n";
-  output << R"html(  </div>
+  output += "    <span>Nodes: ";
+  output += std::to_string(graph.nodes.size());
+  output += "</span>\n";
+  output += "    <span>Edges: ";
+  output += std::to_string(graph.edges.size());
+  output += "</span>\n";
+  output += R"html(  </div>
 </header>
 <main>
   <section class="stage" aria-label="Graph visualization">
@@ -400,8 +410,10 @@ std::string export_graph_html(const GraphSnapshot& graph) {
 </div>
 <script>
 )html";
-  output << "const graphData = " << json_for_script(to_node_link_json(graph)) << ";\n";
-  output << R"html(
+  output += "const graphData = ";
+  append_json_for_script(output, to_node_link_json(graph));
+  output += ";\n";
+  output += R"html(
 const canvas = document.getElementById("graph-canvas");
 const ctx = canvas.getContext("2d");
 const search = document.getElementById("search");
@@ -1064,7 +1076,7 @@ render();
 </script>
 </body>
 </html>)html";
-  return output.str();
+  return output;
 }
 
 std::string export_graph_svg(const GraphSnapshot& graph) {
