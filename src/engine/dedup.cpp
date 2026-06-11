@@ -57,8 +57,7 @@ class UnionFind {
   return {};
 }
 
-[[nodiscard]] bool has_meaningful_entropy(const Node& node, const DedupOptions& options) {
-  const auto normalized = make_id(node.label);
+[[nodiscard]] bool has_meaningful_entropy(std::string_view normalized, const DedupOptions& options) {
   return normalized.size() >= 3 && shannon_entropy(normalized) >= options.entropy_floor;
 }
 
@@ -141,9 +140,8 @@ class UnionFind {
   return bands;
 }
 
-[[nodiscard]] bool same_community(const Node& lhs, const Node& rhs) {
-  const auto left = community_of(lhs);
-  return !left.empty() && left == community_of(rhs);
+[[nodiscard]] bool same_community(std::string_view lhs, std::string_view rhs) {
+  return !lhs.empty() && lhs == rhs;
 }
 
 [[nodiscard]] std::string canonical_node_id(const std::vector<Node>& nodes, UnionFind& groups, std::size_t index) {
@@ -153,6 +151,7 @@ class UnionFind {
 
 void rewrite_edges(GraphSnapshot& graph, UnionFind& groups, const std::unordered_map<std::string, std::size_t>& index_by_id) {
   std::unordered_set<std::string> seen_edges;
+  seen_edges.reserve(graph.edges.size());
   std::vector<Edge> rewritten;
   rewritten.reserve(graph.edges.size());
 
@@ -195,11 +194,21 @@ void semantic_dedup_impl(
     return;
   }
 
-  UnionFind groups(graph.nodes.size());
+  const std::size_t node_count = graph.nodes.size();
+  UnionFind groups(node_count);
   std::unordered_map<std::string, std::size_t> index_by_id;
+  index_by_id.reserve(node_count);
   std::unordered_map<std::string, std::size_t> exact;
+  exact.reserve(node_count);
   std::unordered_map<std::string, std::vector<std::size_t>> buckets;
   std::unordered_map<std::string, std::vector<std::size_t>> community_buckets;
+
+  // Normalizing a label via make_id() runs three utf8proc passes; the original
+  // code recomputed it once per node here and twice more per candidate pair.
+  // Cache it once per node and reuse, along with each node's community, so the
+  // pairwise loop reads precomputed strings instead of re-normalizing.
+  std::vector<std::string> normalized_labels(node_count);
+  std::vector<std::string> communities(node_count);
 
   const auto in_scope = [&scoped_sources, full_graph](const Node& node) {
     return full_graph || scoped_sources.contains(node.source_file);
@@ -208,7 +217,9 @@ void semantic_dedup_impl(
   for (std::size_t index = 0; index < graph.nodes.size(); ++index) {
     index_by_id.emplace(graph.nodes[index].id, index);
     const auto& node = graph.nodes[index];
-    const auto normalized = make_id(node.label);
+    normalized_labels[index] = make_id(node.label);
+    const auto& normalized = normalized_labels[index];
+    communities[index] = community_of(node);
 
     // A file's identity is its path, never a fuzzy label match. Two sibling
     // files with similar names ("compiq-viewer.tsx" / "compiq-viewer-states.tsx")
@@ -234,7 +245,7 @@ void semantic_dedup_impl(
     }
 
     // Pass 2 (fuzzy) only considers high-entropy labels.
-    if (!has_meaningful_entropy(node, options)) {
+    if (!has_meaningful_entropy(normalized, options)) {
       continue;
     }
 
@@ -242,7 +253,7 @@ void semantic_dedup_impl(
       buckets[band].push_back(index);
     }
 
-    if (const auto community = community_of(graph.nodes[index]); !community.empty()) {
+    if (const auto& community = communities[index]; !community.empty()) {
       community_buckets[community].push_back(index);
     }
   }
@@ -251,7 +262,10 @@ void semantic_dedup_impl(
     buckets["community:" + community].insert(buckets["community:" + community].end(), bucket.begin(), bucket.end());
   }
 
-  std::unordered_set<std::string> compared;
+  // Pairs land in multiple bands, so a pair can be visited many times. Key the
+  // dedup set on the two node indices packed into one 64-bit integer instead of
+  // formatting a string per visit (node counts stay well under 2^32).
+  std::unordered_set<std::uint64_t> compared;
   for (const auto& [_, bucket] : buckets) {
     for (std::size_t left_pos = 0; left_pos < bucket.size(); ++left_pos) {
       for (std::size_t right_pos = left_pos + 1; right_pos < bucket.size(); ++right_pos) {
@@ -261,15 +275,16 @@ void semantic_dedup_impl(
           continue;
         }
 
-        const auto key = std::to_string(std::min(left, right)) + ":" + std::to_string(std::max(left, right));
+        const auto key =
+            (static_cast<std::uint64_t>(std::min(left, right)) << 32) | static_cast<std::uint64_t>(std::max(left, right));
         if (!compared.insert(key).second) {
           continue;
         }
 
-        const auto left_label = make_id(graph.nodes[left].label);
-        const auto right_label = make_id(graph.nodes[right].label);
+        const auto& left_label = normalized_labels[left];
+        const auto& right_label = normalized_labels[right];
         const auto threshold =
-            same_community(graph.nodes[left], graph.nodes[right]) ? options.same_community_threshold : options.jaro_winkler_threshold;
+            same_community(communities[left], communities[right]) ? options.same_community_threshold : options.jaro_winkler_threshold;
         const auto similarity = jaro_winkler_similarity(left_label, right_label);
         if (similarity < threshold) {
           continue;
