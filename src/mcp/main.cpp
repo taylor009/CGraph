@@ -15,9 +15,8 @@ int main(int argc, char** argv) {
   } else {
     base.project_root = std::filesystem::current_path();
   }
-  if (const auto* env = std::getenv("CGRAPH_DAEMON_PATH"); env != nullptr && env[0] != '\0') {
-    base.daemon_path = env;
-  }
+  // Daemon discovery (CGRAPH_DAEMON_PATH, graphd beside this binary) happens in
+  // resolve_daemon_path via default_client_runtime_hooks; --daemon overrides it.
   for (int index = 1; index < argc; ++index) {
     const std::string arg = argv[index];
     if ((arg == "--root" || arg == "-r") && index + 1 < argc) {

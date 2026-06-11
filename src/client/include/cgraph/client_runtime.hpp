@@ -34,6 +34,12 @@ struct ClientRuntimeHooks {
   std::function<void(std::chrono::milliseconds)> sleep;
 };
 
+// Locate the graphd binary for auto-spawn: an explicit path wins, then the
+// CGRAPH_DAEMON_PATH environment variable, then graphd next to the running
+// executable (installed layout) or in the build tree's daemon/ directory.
+// Returns an empty path when nothing is found.
+[[nodiscard]] std::filesystem::path resolve_daemon_path(const std::filesystem::path& requested);
+
 [[nodiscard]] ClientRuntimeHooks default_client_runtime_hooks(const ClientRequest& request);
 [[nodiscard]] ClientResult send_thin_client_request(const ClientRequest& request, ClientRuntimeHooks hooks);
 

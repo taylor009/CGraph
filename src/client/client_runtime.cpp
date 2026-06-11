@@ -6,9 +6,11 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
 
@@ -16,6 +18,10 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
 #endif
 
 namespace cgraph {
@@ -47,14 +53,56 @@ std::chrono::milliseconds backoff_for(const ClientRequest& request, int attempt)
   return request.initial_backoff * multiplier;
 }
 
+[[nodiscard]] std::filesystem::path current_executable_path() {
+#if defined(__APPLE__)
+  std::uint32_t size = 0;
+  _NSGetExecutablePath(nullptr, &size);
+  std::string buffer(size, '\0');
+  if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+    return {};
+  }
+  buffer.resize(std::strlen(buffer.c_str()));
+  std::error_code ec;
+  const auto canonical = std::filesystem::canonical(buffer, ec);
+  return ec ? std::filesystem::path{buffer} : canonical;
+#elif defined(__linux__)
+  std::error_code ec;
+  const auto path = std::filesystem::read_symlink("/proc/self/exe", ec);
+  return ec ? std::filesystem::path{} : path;
+#else
+  return {};
+#endif
+}
+
 }  // namespace
+
+std::filesystem::path resolve_daemon_path(const std::filesystem::path& requested) {
+  if (!requested.empty()) {
+    return requested;
+  }
+  if (const char* env = std::getenv("CGRAPH_DAEMON_PATH"); env != nullptr && env[0] != '\0') {
+    return env;
+  }
+  // Zero-config: graphd ships beside the client/MCP binary (installed layout),
+  // or under the sibling daemon/ directory (the CMake build tree).
+  if (const auto self = current_executable_path(); !self.empty()) {
+    const auto bin_dir = self.parent_path();
+    for (const auto& candidate : {bin_dir / "graphd", bin_dir.parent_path() / "daemon" / "graphd"}) {
+      std::error_code ec;
+      if (std::filesystem::exists(candidate, ec)) {
+        return candidate;
+      }
+    }
+  }
+  return {};
+}
 
 ClientRuntimeHooks default_client_runtime_hooks(const ClientRequest& request) {
   ClientRuntimeHooks hooks;
   hooks.connect = [](const DaemonIdentity& identity, const nlohmann::json& frame) -> std::optional<nlohmann::json> {
     return request_over_unix_socket(unix_socket_path(identity), frame);
   };
-  hooks.spawn = [daemon_path = request.daemon_path](const DaemonIdentity& identity) {
+  hooks.spawn = [daemon_path = resolve_daemon_path(request.daemon_path)](const DaemonIdentity& identity) {
     if (daemon_path.empty()) {
       return false;
     }
@@ -137,7 +185,9 @@ ClientResult send_thin_client_request(const ClientRequest& request, ClientRuntim
     }
     result.spawned = hooks.spawn(identity);
     if (!result.spawned) {
-      result.error = "failed to spawn daemon";
+      result.error =
+          "failed to spawn daemon: graphd not found (pass --daemon PATH, set CGRAPH_DAEMON_PATH, "
+          "or install graphd next to this binary)";
       return result;
     }
   }

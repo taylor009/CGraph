@@ -20,7 +20,20 @@ int main() {
 
   cgraph::DaemonState state;
   state.pid = 123;
+
+  // Before any build publishes, the daemon serves the default Empty snapshot;
+  // read ops must say so, or an agent can't tell "no match" from "still building".
+  const auto during_build = cgraph::handle_daemon_request(state, cgraph::make_request("query", {{"q", "Alpha"}}));
+  if (during_build["result"].value("graph_state", std::string{}) != "building") {
+    return 1;
+  }
+  const auto empty_status = cgraph::handle_daemon_request(state, cgraph::make_request("status"));
+  if (empty_status["result"].value("build_state", std::string{}) != "building") {
+    return 1;
+  }
+
   cgraph::GraphSnapshot graph;
+  graph.build_state = cgraph::BuildState::DeterministicReady;
   // "a" is the central hub (centrality 1.0, a god node); "AlphaLeaf" also matches
   // the "Alpha" query but is peripheral. Edges c -> a -> b form a chain so the
   // blast radius has two depths to walk.
@@ -34,20 +47,32 @@ int main() {
   graph.nodes.push_back(cgraph::Node{.id = "b", .label = "Beta", .kind = "function"});
   graph.nodes.push_back(cgraph::Node{
       .id = "c", .label = "AlphaLeaf", .kind = "function", .properties = {{"degree_centrality", "0.100000"}}});
+  // "d" carries a full-signature label, the shape real extractors emit.
+  graph.nodes.push_back(cgraph::Node{.id = "d", .label = "gamma_run(int x, bool dry)", .kind = "function"});
   graph.edges.push_back(cgraph::Edge{.source = "a", .target = "b", .relation = "CALLS"});
   graph.edges.push_back(cgraph::Edge{.source = "c", .target = "a", .relation = "CALLS"});
   cgraph::publish_graph_snapshot(state, std::move(graph));
 
   const auto status = cgraph::handle_daemon_request(state, cgraph::make_request("status"));
-  if (!status["ok"].get<bool>() || status["result"]["node_count"] != 3) {
+  if (!status["ok"].get<bool>() || status["result"]["node_count"] != 4 ||
+      status["result"].value("build_state", std::string{}) != "ready") {
     return 1;
   }
 
-  const auto query = cgraph::handle_daemon_request(state, cgraph::make_request("query", {{"q", "Alpha"}}));
+  // A bare symbol name resolves against the label's leading token, so an agent
+  // never needs the full signature ("gamma_run" -> "gamma_run(int x, bool dry)").
+  const auto by_symbol = cgraph::handle_daemon_request(state, cgraph::make_request("explain", {{"id", "gamma_run"}}));
+  if (by_symbol["result"].value("id", std::string{}) != "d") {
+    return 1;
+  }
+
+  // Matching is case-insensitive: "alpha" finds "Alpha" and "AlphaLeaf". A ready
+  // graph carries no "building" annotation.
+  const auto query = cgraph::handle_daemon_request(state, cgraph::make_request("query", {{"q", "alpha"}}));
   const auto& query_result = query["result"];
   const auto& query_nodes = query_result["nodes"];
   // Both "Alpha" and "AlphaLeaf" match; total reflects the full match count.
-  if (query_nodes.size() != 2 || query_result.value("total", 0U) != 2U) {
+  if (query_nodes.size() != 2 || query_result.value("total", 0U) != 2U || query_result.contains("graph_state")) {
     return 1;
   }
   // Ranked by centrality: the hub "a" must lead, carrying file:line, its
@@ -59,6 +84,28 @@ int main() {
   }
   if (query_nodes[1].value("label", std::string{}) != "AlphaLeaf") {
     return 1;  // peripheral node ranked below the hub
+  }
+
+  // kind/file filters narrow the match set.
+  const auto by_kind = cgraph::handle_daemon_request(
+      state, cgraph::make_request("query", {{"q", "alpha"}, {"kind", "class"}}));
+  if (by_kind["result"]["nodes"].size() != 1 ||
+      by_kind["result"]["nodes"][0].value("id", std::string{}) != "a") {
+    return 1;
+  }
+  const auto by_file = cgraph::handle_daemon_request(
+      state, cgraph::make_request("query", {{"q", "alpha"}, {"file", "alpha.cpp"}}));
+  if (by_file["result"]["nodes"].size() != 1 ||
+      by_file["result"]["nodes"][0].value("id", std::string{}) != "a") {
+    return 1;
+  }
+
+  // A near-miss ("Alpa") returns did-you-mean suggestions instead of a bare
+  // empty result, so an agent can self-correct.
+  const auto miss = cgraph::handle_daemon_request(state, cgraph::make_request("query", {{"q", "Alpa"}}));
+  if (miss["result"].value("total", 1U) != 0U || miss["result"]["suggestions"].empty() ||
+      miss["result"]["suggestions"][0].value("label", std::string{}) != "Alpha") {
+    return 1;
   }
 
   // Blast radius: what breaks if "b" changes? Its dependents are "a" (depth 1,
@@ -80,15 +127,23 @@ int main() {
     return 1;
   }
   // Opposite direction: what does "c" depend on? a (depth 1) then b (depth 2).
+  // The seed is given by label ("AlphaLeaf") and the echo carries the canonical id.
   const auto deps = cgraph::handle_daemon_request(
-      state, cgraph::make_request("impact", {{"id", "c"}, {"direction", "dependencies"}, {"max_depth", 3}}));
+      state, cgraph::make_request("impact", {{"id", "AlphaLeaf"}, {"direction", "dependencies"}, {"max_depth", 3}}));
   const auto& deps_nodes = deps["result"]["nodes"];
-  if (deps_nodes.size() != 2 || deps_nodes[0].value("id", std::string{}) != "a" ||
-      deps_nodes[1].value("id", std::string{}) != "b") {
+  if (deps["result"].value("id", std::string{}) != "c" || deps_nodes.size() != 2 ||
+      deps_nodes[0].value("id", std::string{}) != "a" || deps_nodes[1].value("id", std::string{}) != "b") {
+    return 1;
+  }
+  // An unknown seed reports found:false plus suggestions, not a silent empty.
+  const auto impact_miss = cgraph::handle_daemon_request(
+      state, cgraph::make_request("impact", {{"id", "AlphaLeef"}}));
+  if (impact_miss["result"].value("found", true) || impact_miss["result"]["suggestions"].empty()) {
     return 1;
   }
 
-  const auto path = cgraph::handle_daemon_request(state, cgraph::make_request("path", {{"source", "a"}, {"target", "b"}}));
+  // Endpoints resolve by label too ("Alpha" -> id "a").
+  const auto path = cgraph::handle_daemon_request(state, cgraph::make_request("path", {{"source", "Alpha"}, {"target", "b"}}));
   if (path["result"]["path"].size() != 2) {
     return 1;
   }
@@ -96,6 +151,14 @@ int main() {
   const auto& path_nodes = path["result"]["path_nodes"];
   if (path_nodes.size() != 2 || path_nodes[0].value("label", std::string{}) != "Alpha" ||
       path_nodes[0].value("line", 0U) != 2U) {
+    return 1;
+  }
+  // A missing endpoint is flagged with suggestions; an empty path alone is
+  // indistinguishable from "no route exists".
+  const auto path_miss = cgraph::handle_daemon_request(
+      state, cgraph::make_request("path", {{"source", "a"}, {"target", "Betb"}}));
+  if (!path_miss["result"]["path"].empty() || path_miss["result"].value("target_found", true) ||
+      path_miss["result"]["target_suggestions"].empty() || path_miss["result"].contains("source_found")) {
     return 1;
   }
 
@@ -114,11 +177,36 @@ int main() {
   if (snippet.rfind("class Alpha {", 0) != 0 || snippet.find("header line") != std::string::npos) {
     return 1;
   }
-  // The neighbor entry must describe the node on the other end (callee "Beta")
-  // with a direction, so the agent can navigate without a second lookup.
+  // Neighbors are ordered most-central-first: AlphaLeaf (0.1) before Beta (no
+  // centrality), and each entry describes the node on the other end with a
+  // direction, so the agent can navigate without a second lookup.
+  if (explain_result.value("neighbor_count", 0U) != 2U) {
+    return 1;
+  }
   const auto& neighbor = explain_result["neighbors"][0];
-  if (neighbor.value("direction", std::string{}) != "out" ||
-      neighbor["node"].value("label", std::string{}) != "Beta") {
+  if (neighbor.value("direction", std::string{}) != "in" ||
+      neighbor["node"].value("label", std::string{}) != "AlphaLeaf") {
+    return 1;
+  }
+  // direction filter keeps only the requested side; limit caps and flags.
+  const auto outgoing = cgraph::handle_daemon_request(
+      state, cgraph::make_request("explain", {{"id", "a"}, {"direction", "out"}}));
+  if (outgoing["result"]["neighbors"].size() != 1 ||
+      outgoing["result"]["neighbors"][0].value("direction", std::string{}) != "out" ||
+      outgoing["result"]["neighbors"][0]["node"].value("label", std::string{}) != "Beta") {
+    return 1;
+  }
+  const auto capped = cgraph::handle_daemon_request(
+      state, cgraph::make_request("explain", {{"id", "a"}, {"limit", 1}}));
+  if (capped["result"]["neighbors"].size() != 1 || !capped["result"].value("truncated", false) ||
+      capped["result"].value("neighbor_count", 0U) != 2U) {
+    return 1;
+  }
+  // Unknown symbol: found:false plus suggestions ("Alpah" ~ "Alpha").
+  const auto explain_miss = cgraph::handle_daemon_request(
+      state, cgraph::make_request("explain", {{"id", "Alpah"}}));
+  if (explain_miss["result"].value("found", true) || explain_miss["result"]["suggestions"].empty() ||
+      explain_miss["result"]["suggestions"][0].value("label", std::string{}) != "Alpha") {
     return 1;
   }
 
@@ -158,6 +246,12 @@ int main() {
   const auto by_query = cgraph::handle_daemon_request(
       state, cgraph::make_request("context", {{"query", "Alpha"}, {"budget", 5000}}));
   if (by_query["result"]["focus"].value("id", std::string{}) != "a") {
+    return 1;
+  }
+  // An unresolvable focus comes back with suggestions, not just a null focus.
+  const auto context_miss = cgraph::handle_daemon_request(
+      state, cgraph::make_request("context", {{"id", "Alpah"}}));
+  if (!context_miss["result"]["focus"].is_null() || context_miss["result"]["suggestions"].empty()) {
     return 1;
   }
 

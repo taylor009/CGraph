@@ -29,9 +29,19 @@ grep/read calls that burn context.
 
 ## How to use the results
 
-- `graph_query` returns ids and `source_file`:`line`. Use the `id` it returns as
-  the input to `graph_explain` / `graph_impact` / `graph_context`. Open the file
-  at `line` directly — no second search needed.
+- `graph_query` matches case-insensitively and can be narrowed with `kind`
+  (e.g. `"function"`, `"class"`, `"file"`), `file` (source-path substring), and
+  `limit`. On zero matches it returns `suggestions` — the closest symbol names —
+  so correct the spelling and retry instead of falling back to grep.
+- Every id-taking tool (`graph_explain` / `graph_impact` / `graph_path` /
+  `graph_context`) also accepts a bare symbol name (e.g. `"merge_fragments"`);
+  the response echoes the canonical `id` it resolved. A miss comes back with
+  `found: false` plus `suggestions`.
+- `graph_query` returns ids and `source_file`:`line`. Open the file at `line`
+  directly — no second search needed.
+- `graph_explain` takes `direction` (`"in"` = callers/importers, `"out"` =
+  callees/imports) and `limit`; neighbors are ordered most-important-first and
+  `neighbor_count`/`truncated` flag when a hub has more edges than returned.
 - `graph_context` is the highest-leverage call before an edit or review: ask for
   a budget (e.g. `4000`) and it returns the focal symbol's source plus its
   neighborhood's source, ranked and trimmed to fit. Read that instead of opening
@@ -45,6 +55,9 @@ grep/read calls that burn context.
 - The `cgraph` MCP server must be registered (it auto-spawns a per-project daemon
   keyed to the project root). The first tool call in a project triggers a
   one-time graph build (seconds), then queries are warm (~10ms).
+- While that first build runs, results carry `"graph_state": "building"` — an
+  empty result then means "not built yet", not "no match". Retry after a few
+  seconds or poll `graph_status` until `build_state` is `"ready"`.
 - After editing source, a `graph_update {path:"."}` rescan refreshes the graph;
   `graph_status` shows node/edge counts and freshness.
 - Fall back to grep/read only when cgraph genuinely has no answer — e.g. a

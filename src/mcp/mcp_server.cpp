@@ -28,43 +28,86 @@ namespace {
   };
 }
 
+[[nodiscard]] nlohmann::json string_param(std::string description) {
+  return nlohmann::json{{"type", "string"}, {"description", std::move(description)}};
+}
+
+[[nodiscard]] nlohmann::json integer_param(std::string description) {
+  return nlohmann::json{{"type", "integer"}, {"description", std::move(description)}};
+}
+
 [[nodiscard]] nlohmann::json tools() {
   return nlohmann::json::array({
-      tool_schema("graph_query", "Search graph nodes by query text", {{"query", {{"type", "string"}}}}),
-      tool_schema("graph_path", "Find a graph path between node ids", {{"source", {{"type", "string"}}}, {"target", {{"type", "string"}}}}),
-      tool_schema("graph_explain", "Explain a graph node and its neighbors", {{"id", {{"type", "string"}}}}),
+      tool_schema(
+          "graph_query",
+          "Find symbols (functions, classes, files, modules) in this project's code graph by name. "
+          "Case-insensitive substring match, ranked by importance; each hit carries source_file and "
+          "line, plus did-you-mean suggestions when nothing matches. Prefer this over grep to locate "
+          "a definition; feed the returned id into graph_explain / graph_impact / graph_context.",
+          {{"query", string_param("substring of the symbol name or id to find")},
+           {"kind", string_param("only nodes of this kind, e.g. function, class, file")},
+           {"file", string_param("only nodes whose source file path contains this substring")},
+           {"limit", integer_param("max results (default 50)")}}),
+      tool_schema(
+          "graph_path",
+          "Shortest connection between two symbols (how A relates to B through calls, imports, "
+          "containment). Accepts node ids or exact symbol names.",
+          {{"source", string_param("node id or exact symbol name to start from")},
+           {"target", string_param("node id or exact symbol name to reach")}}),
+      tool_schema(
+          "graph_explain",
+          "One symbol in depth: its source snippet plus every caller, callee, import, and container "
+          "edge (most important neighbors first). Accepts a node id or exact symbol name. Use after "
+          "graph_query to understand how a symbol is used.",
+          {{"id", string_param("node id or exact symbol name")},
+           {"direction", {{"type", "string"}, {"enum", {"in", "out", "both"}},
+                          {"description", "in = callers/importers only, out = callees/imports only (default both)"}}},
+           {"limit", integer_param("max neighbor edges returned (default 100)")}}),
       tool_schema(
           "graph_impact",
-          "Transitive blast radius of a node: dependents (callers/importers that break if it changes), "
-          "dependencies (what it relies on), or both, bounded by max_depth",
-          {{"id", {{"type", "string"}}},
-           {"direction", {{"type", "string"}, {"enum", {"dependents", "dependencies", "both"}}}},
-           {"relation", {{"type", "string"}}},
-           {"max_depth", {{"type", "integer"}}},
-           {"limit", {{"type", "integer"}}}}),
+          "Transitive blast radius of a symbol: dependents (callers/importers that break if it "
+          "changes), dependencies (what it relies on), or both, bounded by max_depth. Use before "
+          "modifying or deleting a symbol to see what is affected.",
+          {{"id", string_param("node id or exact symbol name")},
+           {"direction", {{"type", "string"}, {"enum", {"dependents", "dependencies", "both"}},
+                          {"description", "default dependents"}}},
+           {"relation", string_param("only follow edges of this relation, e.g. CALLS, IMPORTS")},
+           {"max_depth", integer_param("hops to traverse (default 3)")},
+           {"limit", integer_param("max nodes returned (default 200)")}}),
       tool_schema(
           "graph_context",
           "Token-budgeted context bundle for a symbol: the focal node plus its most relevant "
-          "neighbors with source snippets, greedily packed to fit a token budget",
-          {{"id", {{"type", "string"}}},
-           {"query", {{"type", "string"}}},
-           {"budget", {{"type", "integer"}}},
-           {"max_depth", {{"type", "integer"}}}}),
-      tool_schema("graph_update", "Request a deterministic graph update", {{"path", {{"type", "string"}}}}),
-      tool_schema("graph_status", "Return daemon graph and enrichment status", nlohmann::json::object()),
-      tool_schema("graph_shutdown", "Ask the daemon to shut down", nlohmann::json::object()),
+          "neighbors with source snippets, greedily packed to fit a token budget. The fastest way "
+          "to load just enough code to edit or review a symbol.",
+          {{"id", string_param("node id or exact symbol name to focus on")},
+           {"query", string_param("free-text fallback when the id is unknown; the best match becomes the focus")},
+           {"budget", integer_param("token budget for the bundle (default 6000)")},
+           {"max_depth", integer_param("neighborhood radius in hops (default 2)")}}),
+      tool_schema(
+          "graph_update",
+          "Rescan the project and refresh the graph after files changed (only re-extracts what "
+          "changed). Blocks until the rescan finishes.",
+          {{"path", string_param("project-relative path hint; \".\" rescans the whole project")}}),
+      tool_schema(
+          "graph_status",
+          "Daemon health: node/edge counts, build_state (\"building\" means the initial graph build "
+          "is still running and query results may be empty), and semantic enrichment progress.",
+          nlohmann::json::object()),
+      tool_schema("graph_shutdown", "Ask the per-project graph daemon to shut down", nlohmann::json::object()),
   });
 }
 
 [[nodiscard]] nlohmann::json daemon_request_for_tool(std::string_view name, const nlohmann::json& arguments) {
+  // query/path/explain forward arguments verbatim so optional params (limit,
+  // kind, file, direction) reach the daemon; each op applies its own defaults.
   if (name == "graph_query") {
-    return make_request("query", {{"q", arguments.value("query", arguments.value("q", std::string{}))}});
+    return make_request("query", arguments);
   }
   if (name == "graph_path") {
-    return make_request("path", {{"source", arguments.value("source", std::string{})}, {"target", arguments.value("target", std::string{})}});
+    return make_request("path", arguments);
   }
   if (name == "graph_explain") {
-    return make_request("explain", {{"id", arguments.value("id", std::string{})}});
+    return make_request("explain", arguments);
   }
   if (name == "graph_impact") {
     // Forward arguments verbatim; the daemon op applies direction/depth/limit

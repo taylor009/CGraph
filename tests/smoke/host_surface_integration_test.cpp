@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
         return cgraph::handle_daemon_request(state, daemon_request);
       });
 
-  if (forwarded["op"] != "query" || forwarded["params"]["q"] != "Guide" ||
+  if (forwarded["op"] != "query" || forwarded["params"]["query"] != "Guide" ||
       !contains(response["result"]["content"][0]["text"].get<std::string>(), "Guide")) {
     return 1;
   }

@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <thread>
@@ -122,6 +123,26 @@ int main() {
 
     if (spawn_calls.load() != 1 || successes.load() != 4) {
       return 1;
+    }
+  }
+
+  // Daemon discovery precedence: an explicit path wins, then CGRAPH_DAEMON_PATH,
+  // then a graphd beside the executable (absent for this test binary -> empty).
+  {
+    ::unsetenv("CGRAPH_DAEMON_PATH");
+    if (cgraph::resolve_daemon_path("/explicit/graphd") != std::filesystem::path{"/explicit/graphd"}) {
+      return 1;
+    }
+    ::setenv("CGRAPH_DAEMON_PATH", "/env/graphd", 1);
+    if (cgraph::resolve_daemon_path({}) != std::filesystem::path{"/env/graphd"}) {
+      return 1;
+    }
+    if (cgraph::resolve_daemon_path("/explicit/graphd") != std::filesystem::path{"/explicit/graphd"}) {
+      return 1;  // explicit beats the environment
+    }
+    ::unsetenv("CGRAPH_DAEMON_PATH");
+    if (!cgraph::resolve_daemon_path({}).empty()) {
+      return 1;  // no graphd ships next to the test binary
     }
   }
 

@@ -58,7 +58,7 @@ treat it as load-bearing.
 **Daemon / client / IPC** (`graph-daemon-client` capability):
 - `daemon_identity.cpp` derives a per-project-root hash + endpoint name (one daemon per canonical project root).
 - `daemon_lifecycle.cpp` / `daemon_endpoint.cpp` handle spawn, listen, and connection.
-- `daemon_ops.cpp::handle_daemon_request` dispatches the six ops (`query`/`path`/`explain`/`update`/`status`/`shutdown`). Graph state is a `shared_ptr<const GraphSnapshot>` read under `snapshot_mutex`; mutations go through a **single-writer path** (`writer_mutex`, `publish_graph_snapshot`/`mutate_graph_snapshot`).
+- `daemon_ops.cpp::handle_daemon_request` dispatches the eight ops (`query`/`path`/`explain`/`impact`/`context`/`update`/`status`/`shutdown`). Graph state is a `shared_ptr<const GraphSnapshot>` read under `snapshot_mutex`; mutations go through a **single-writer path** (`writer_mutex`, `publish_graph_snapshot`/`mutate_graph_snapshot`).
 - `protocol.cpp` — length-prefixed JSON frames, `kProtocolVersion = 1`; version-checked on every message.
 - `client_runtime.cpp` — thin client with connect/spawn/backoff hooks (`ClientRuntimeHooks`); auto-spawns the daemon if absent.
 - `incremental_update.cpp` + `file_watcher.cpp` + `file_cache.cpp` — `update .` triggers a full stat-index rescan; the watcher feeds incremental graph updates.
@@ -74,8 +74,8 @@ validate against the Graphify fragment schema (malformed → rejected, graph unc
 `status` (`enrichment_state`/`pending`/`running`/`stale`/`failed`).
 
 **MCP** (`src/mcp/mcp_server.cpp`): exposes `graph_query`/`graph_path`/`graph_explain`/
-`graph_update`/`graph_status`/`graph_shutdown` tools that translate directly to daemon ops. Adds
-no model logic.
+`graph_impact`/`graph_context`/`graph_update`/`graph_status`/`graph_shutdown` tools that translate
+directly to daemon ops. Adds no model logic.
 
 ## Conventions
 

@@ -207,10 +207,13 @@ of blind grep/read. It exposes eight tools:
 | `graph_shutdown` | Stop the daemon |
 
 The server resolves the project root from `--root`, then `CLAUDE_PROJECT_DIR`,
-then the working directory. Pass `--daemon <path-to-graphd>` so it auto-spawns a
-per-project daemon on the first call (without it, no daemon is started). The
-first call triggers a one-time graph build (seconds); subsequent queries are
-warm (~10ms).
+then the working directory. It finds the `graphd` daemon binary on its own: an
+explicit `--daemon <path-to-graphd>` wins, then `CGRAPH_DAEMON_PATH`, then a
+`graphd` installed next to the `cgraph-mcp` binary (the build tree layout also
+works). With the binaries side by side you can omit `--daemon` entirely. The
+first call triggers a one-time graph build (seconds); while it runs, query
+results carry `"graph_state": "building"` so an empty result is never mistaken
+for "no match". Subsequent queries are warm (~10ms).
 
 In the examples below, replace `/abs/path/to/CGraph` with this repo's absolute
 path.

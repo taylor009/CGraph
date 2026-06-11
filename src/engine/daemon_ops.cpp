@@ -3,13 +3,16 @@
 #include "cgraph/protocol.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace cgraph {
 namespace {
@@ -24,6 +27,13 @@ constexpr std::size_t kMaxSnippetChars = 2000;
 constexpr std::size_t kDefaultQueryLimit = 50;
 constexpr std::size_t kDefaultImpactLimit = 200;
 constexpr int kDefaultImpactDepth = 3;
+
+// God nodes can touch hundreds of edges; explain caps the neighbor list (most
+// central first) so one call stays token-cheap.
+constexpr std::size_t kDefaultExplainNeighborLimit = 100;
+
+// How many did-you-mean candidates a missed lookup returns.
+constexpr std::size_t kMaxSuggestions = 5;
 
 // Context packing: a token budget to fill and how far around the focal symbol to
 // gather candidates.
@@ -153,19 +163,168 @@ struct Snippet {
   return by_id;
 }
 
+[[nodiscard]] char ascii_lower(char value) {
+  return static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
+}
+
+[[nodiscard]] std::string ascii_lower(std::string_view text) {
+  std::string lowered(text);
+  std::ranges::transform(lowered, lowered.begin(), [](char value) { return ascii_lower(value); });
+  return lowered;
+}
+
+// Case-insensitive substring search; the needle must already be lowercase.
+// Symbol queries are typed by an agent that rarely knows the exact casing.
+[[nodiscard]] bool contains_ci(std::string_view haystack, std::string_view lower_needle) {
+  if (lower_needle.empty()) {
+    return true;
+  }
+  const auto it = std::search(
+      haystack.begin(), haystack.end(), lower_needle.begin(), lower_needle.end(),
+      [](char hay, char needle) { return ascii_lower(hay) == needle; });
+  return it != haystack.end();
+}
+
 [[nodiscard]] std::vector<const Node*> matching_nodes(const GraphSnapshot& graph, const std::string& needle) {
+  const auto lower_needle = ascii_lower(needle);
   std::vector<const Node*> matches;
   for (const auto& node : graph.nodes) {
-    if (node.id.find(needle) != std::string::npos || node.label.find(needle) != std::string::npos) {
+    if (contains_ci(node.id, lower_needle) || contains_ci(node.label, lower_needle)) {
       matches.push_back(&node);
     }
   }
   return matches;
 }
 
+// Levenshtein distance, abandoned (returning cap + 1) as soon as it must exceed
+// `cap` — suggestion scoring only cares about near misses.
+[[nodiscard]] std::size_t bounded_edit_distance(std::string_view a, std::string_view b, std::size_t cap) {
+  if (a.size() > b.size()) {
+    std::swap(a, b);
+  }
+  if (b.size() - a.size() > cap) {
+    return cap + 1;
+  }
+  std::vector<std::size_t> row(a.size() + 1);
+  for (std::size_t i = 0; i <= a.size(); ++i) {
+    row[i] = i;
+  }
+  for (std::size_t j = 1; j <= b.size(); ++j) {
+    std::size_t diagonal = row[0];
+    row[0] = j;
+    std::size_t row_min = row[0];
+    for (std::size_t i = 1; i <= a.size(); ++i) {
+      const std::size_t substitution = diagonal + (a[i - 1] == b[j - 1] ? 0 : 1);
+      diagonal = row[i];
+      row[i] = std::min({row[i] + 1, row[i - 1] + 1, substitution});
+      row_min = std::min(row_min, row[i]);
+    }
+    if (row_min > cap) {
+      return cap + 1;
+    }
+  }
+  return row.back();
+}
+
+// The leading symbol token of a label: everything before the first '(' or
+// whitespace. Labels often carry full signatures ("merge_fragments(GraphSnapshot&
+// graph, ...)"); agents pass bare names ("merge_fragments").
+[[nodiscard]] std::string_view label_symbol(const Node& node) {
+  const std::string_view label{node.label};
+  const auto cut = label.find_first_of("( \t\n");
+  return cut == std::string_view::npos ? label : label.substr(0, cut);
+}
+
+// Closest labels to a missed lookup, so an agent can self-correct (wrong
+// casing, typo, label-vs-id confusion) instead of concluding the symbol does
+// not exist and falling back to grep.
+[[nodiscard]] nlohmann::json suggest_similar(const GraphSnapshot& graph, const std::string& needle) {
+  auto suggestions = nlohmann::json::array();
+  if (needle.empty()) {
+    return suggestions;
+  }
+  const auto lower_needle = ascii_lower(needle);
+  const auto cap = std::max<std::size_t>(2, lower_needle.size() / 3);
+
+  std::vector<std::pair<std::size_t, const Node*>> scored;
+  for (const auto& node : graph.nodes) {
+    auto distance = bounded_edit_distance(lower_needle, ascii_lower(label_symbol(node)), cap);
+    // The trailing segment of the id (after the last separator) is usually the
+    // bare symbol name; match against it too so path-qualified ids still rank.
+    if (distance > cap) {
+      const auto tail_start = node.id.find_last_of(":/.");
+      if (tail_start != std::string::npos && tail_start + 1 < node.id.size()) {
+        const auto tail = std::string_view{node.id}.substr(tail_start + 1);
+        distance = bounded_edit_distance(lower_needle, ascii_lower(tail), cap);
+      }
+    }
+    if (distance <= cap) {
+      scored.emplace_back(distance, &node);
+    }
+  }
+  std::ranges::sort(scored, [](const auto& lhs, const auto& rhs) {
+    if (lhs.first != rhs.first) {
+      return lhs.first < rhs.first;  // closer first
+    }
+    const auto lc = node_centrality(*lhs.second);
+    const auto rc = node_centrality(*rhs.second);
+    if (lc != rc) {
+      return lc > rc;  // more important first
+    }
+    return lhs.second->label < rhs.second->label;
+  });
+  if (scored.size() > kMaxSuggestions) {
+    scored.resize(kMaxSuggestions);
+  }
+  for (const auto& [distance, node] : scored) {
+    suggestions.push_back(node_brief(*node));
+  }
+  return suggestions;
+}
+
+// Resolve a node by exact id, exact label, or bare symbol name (the label's
+// leading token, case-insensitive) — every id-taking op accepts any of these,
+// so an agent can pass a symbol name without a prior query round-trip. When a
+// bare name is ambiguous, the highest-centrality match wins; the response
+// echoes the resolved id so the agent sees which one.
+[[nodiscard]] const Node* resolve_node(
+    const GraphSnapshot& graph,
+    const std::unordered_map<std::string, const Node*>& by_id,
+    const std::string& key) {
+  if (const auto it = by_id.find(key); it != by_id.end()) {
+    return it->second;
+  }
+  for (const auto& node : graph.nodes) {
+    if (node.label == key) {
+      return &node;
+    }
+  }
+  const auto lower_key = ascii_lower(key);
+  const Node* best = nullptr;
+  for (const auto& node : graph.nodes) {
+    if (ascii_lower(label_symbol(node)) != lower_key) {
+      continue;
+    }
+    if (best == nullptr || node_centrality(node) > node_centrality(*best) ||
+        (node_centrality(node) == node_centrality(*best) && node.label < best->label)) {
+      best = &node;
+    }
+  }
+  return best;
+}
+
 [[nodiscard]] nlohmann::json query_graph(const GraphSnapshot& graph, const nlohmann::json& params) {
   const auto needle = params.value("q", params.value("query", std::string{}));
   auto matches = matching_nodes(graph, needle);
+
+  // Optional narrowing: `kind` (exact, e.g. "function") and `file` (substring
+  // of the source path), both case-insensitive.
+  if (const auto kind = ascii_lower(params.value("kind", std::string{})); !kind.empty()) {
+    std::erase_if(matches, [&](const Node* node) { return ascii_lower(node->kind) != kind; });
+  }
+  if (const auto file = ascii_lower(params.value("file", std::string{})); !file.empty()) {
+    std::erase_if(matches, [&](const Node* node) { return !contains_ci(node->source_file, file); });
+  }
 
   // Rank by importance so the most central (most-connected / god) nodes lead —
   // an agent reading the top few results lands on the symbols that matter.
@@ -189,7 +348,11 @@ struct Snippet {
     nodes.push_back(node_brief(*node));
   }
   const auto returned = nodes.size();  // capture before the move below
-  return {{"nodes", std::move(nodes)}, {"total", total}, {"returned", returned}};
+  nlohmann::json result{{"nodes", std::move(nodes)}, {"total", total}, {"returned", returned}};
+  if (total == 0) {
+    result["suggestions"] = suggest_similar(graph, needle);
+  }
+  return result;
 }
 
 // Transitive blast radius: BFS from a node along directed edges. `dependents`
@@ -205,10 +368,14 @@ struct Snippet {
   const auto limit = params.value("limit", kDefaultImpactLimit);
 
   const auto by_id = index_nodes(graph);
-  if (!by_id.contains(id)) {
-    return {{"id", id}, {"direction", direction}, {"max_depth", max_depth},
-            {"total", 0}, {"returned", 0}, {"nodes", nlohmann::json::array()}};
+  const auto* seed = resolve_node(graph, by_id, id);
+  if (seed == nullptr) {
+    return {{"id", id}, {"found", false}, {"direction", direction}, {"max_depth", max_depth},
+            {"total", 0}, {"returned", 0}, {"nodes", nlohmann::json::array()},
+            {"suggestions", suggest_similar(graph, id)}};
   }
+  // The canonical id (the requested key may have been a label).
+  const auto& seed_id = seed->id;
 
   const bool want_dependents = direction == "dependents" || direction == "both";
   const bool want_dependencies = direction == "dependencies" || direction == "both";
@@ -237,8 +404,8 @@ struct Snippet {
   };
   std::unordered_map<std::string, Reached> reached;
   std::queue<std::string> frontier;
-  reached[id] = {0, {}};
-  frontier.push(id);
+  reached[seed_id] = {0, {}};
+  frontier.push(seed_id);
   while (!frontier.empty()) {
     const auto current = frontier.front();
     frontier.pop();
@@ -262,7 +429,7 @@ struct Snippet {
   // Drop the seed itself; order by (depth asc, centrality desc).
   std::vector<const Node*> hits;
   for (const auto& [node_id, info] : reached) {
-    if (node_id == id) {
+    if (node_id == seed_id) {
       continue;
     }
     if (const auto it = by_id.find(node_id); it != by_id.end()) {
@@ -299,8 +466,9 @@ struct Snippet {
     nodes.push_back(std::move(brief));
   }
 
+  // Echo the canonical id (the request may have used the label).
   nlohmann::json result{
-      {"id", id}, {"direction", direction}, {"max_depth", max_depth},
+      {"id", seed_id}, {"direction", direction}, {"max_depth", max_depth},
       {"total", total}, {"returned", nodes.size()}, {"nodes", std::move(nodes)}};
   if (truncated) {
     result["truncated"] = true;
@@ -323,31 +491,20 @@ struct Snippet {
 
   // Resolve the focal node: exact id, then label, then the top-ranked match for
   // a free-text query.
-  const Node* focal = nullptr;
-  if (const auto id = params.value("id", std::string{}); !id.empty()) {
-    if (const auto it = by_id.find(id); it != by_id.end()) {
-      focal = it->second;
-    } else {
-      for (const auto& node : graph.nodes) {
-        if (node.label == id) {
-          focal = &node;
-          break;
-        }
-      }
-    }
-  }
-  if (focal == nullptr) {
-    if (const auto needle = params.value("q", params.value("query", std::string{})); !needle.empty()) {
-      for (const auto* match : matching_nodes(graph, needle)) {
-        if (focal == nullptr || node_centrality(*match) > node_centrality(*focal)) {
-          focal = match;
-        }
+  const auto id = params.value("id", std::string{});
+  const auto needle = params.value("q", params.value("query", std::string{}));
+  const Node* focal = id.empty() ? nullptr : resolve_node(graph, by_id, id);
+  if (focal == nullptr && !needle.empty()) {
+    for (const auto* match : matching_nodes(graph, needle)) {
+      if (focal == nullptr || node_centrality(*match) > node_centrality(*focal)) {
+        focal = match;
       }
     }
   }
   if (focal == nullptr) {
     return {{"focus", nullptr}, {"budget", budget}, {"tokens_used", 0},
-            {"included", nlohmann::json::array()}, {"omitted", 0}};
+            {"included", nlohmann::json::array()}, {"omitted", 0},
+            {"suggestions", suggest_similar(graph, id.empty() ? needle : id)}};
   }
 
   // Undirected neighborhood: callers, callees, container, and siblings reachable
@@ -460,41 +617,93 @@ struct Snippet {
 
 [[nodiscard]] nlohmann::json explain_node(const GraphSnapshot& graph, const nlohmann::json& params) {
   const auto id = params.value("id", std::string{});
-  const auto by_id = index_nodes(graph);
-  for (const auto& node : graph.nodes) {
-    if (node.id == id || node.label == id) {
-      auto neighbors = nlohmann::json::array();
-      for (const auto& edge : graph.edges) {
-        const bool outgoing = edge.source == node.id;
-        const bool incoming = edge.target == node.id;
-        if (!outgoing && !incoming) {
-          continue;
-        }
-        nlohmann::json entry{
-            {"source", edge.source},
-            {"target", edge.target},
-            {"relation", edge.relation},
-            {"direction", outgoing ? "out" : "in"}};
-        // Attach the brief of the node on the other end so an agent can navigate
-        // (open the caller/callee) without a second lookup.
-        const auto& other_id = outgoing ? edge.target : edge.source;
-        if (const auto it = by_id.find(other_id); it != by_id.end()) {
-          entry["node"] = node_brief(*it->second);
-        }
-        neighbors.push_back(std::move(entry));
-      }
+  // "in" keeps only edges into the node (callers/importers), "out" only edges
+  // it points at (callees/imports); default is both.
+  const auto direction = params.value("direction", std::string{"both"});
+  const auto limit = params.value("limit", kDefaultExplainNeighborLimit);
 
-      auto result = with_source(node_brief(node), node);
-      result["neighbors"] = std::move(neighbors);
-      return result;
-    }
+  const auto by_id = index_nodes(graph);
+  const auto* node = resolve_node(graph, by_id, id);
+  if (node == nullptr) {
+    return {{"id", id}, {"found", false}, {"neighbors", nlohmann::json::array()},
+            {"suggestions", suggest_similar(graph, id)}};
   }
-  return {{"id", id}, {"neighbors", nlohmann::json::array()}};
+
+  struct NeighborEntry {
+    nlohmann::json entry;
+    double centrality = 0.0;
+  };
+  std::vector<NeighborEntry> neighbors;
+  for (const auto& edge : graph.edges) {
+    const bool outgoing = edge.source == node->id;
+    const bool incoming = edge.target == node->id;
+    if (!outgoing && !incoming) {
+      continue;
+    }
+    if ((direction == "out" && !outgoing) || (direction == "in" && !incoming)) {
+      continue;
+    }
+    nlohmann::json entry{
+        {"source", edge.source},
+        {"target", edge.target},
+        {"relation", edge.relation},
+        {"direction", outgoing ? "out" : "in"}};
+    // Attach the brief of the node on the other end so an agent can navigate
+    // (open the caller/callee) without a second lookup.
+    const auto& other_id = outgoing ? edge.target : edge.source;
+    double centrality = 0.0;
+    if (const auto it = by_id.find(other_id); it != by_id.end()) {
+      entry["node"] = node_brief(*it->second);
+      centrality = node_centrality(*it->second);
+    }
+    neighbors.push_back({std::move(entry), centrality});
+  }
+
+  // Most important neighbors first, so a capped list still shows what matters
+  // when the node is a heavily-connected hub.
+  std::ranges::stable_sort(neighbors, [](const NeighborEntry& lhs, const NeighborEntry& rhs) {
+    return lhs.centrality > rhs.centrality;
+  });
+  const auto neighbor_count = neighbors.size();
+  const bool truncated = limit > 0 && neighbors.size() > limit;
+  if (truncated) {
+    neighbors.resize(limit);
+  }
+
+  auto entries = nlohmann::json::array();
+  for (auto& neighbor : neighbors) {
+    entries.push_back(std::move(neighbor.entry));
+  }
+  auto result = with_source(node_brief(*node), *node);
+  result["neighbor_count"] = neighbor_count;
+  result["neighbors"] = std::move(entries);
+  if (truncated) {
+    result["truncated"] = true;
+  }
+  return result;
 }
 
 [[nodiscard]] nlohmann::json shortest_path(const GraphSnapshot& graph, const nlohmann::json& params) {
-  const auto source = params.value("source", std::string{});
-  const auto target = params.value("target", std::string{});
+  const auto by_id_nodes = index_nodes(graph);
+  const auto resolve_endpoint = [&](const std::string& key) {
+    const auto* node = resolve_node(graph, by_id_nodes, key);
+    return node == nullptr ? key : node->id;
+  };
+  // Endpoints accept labels too; flag the missing one(s) with suggestions so an
+  // empty path is distinguishable from "no route exists".
+  const auto source_key = params.value("source", std::string{});
+  const auto target_key = params.value("target", std::string{});
+  const auto source = resolve_endpoint(source_key);
+  const auto target = resolve_endpoint(target_key);
+  nlohmann::json missing = nlohmann::json::object();
+  if (!by_id_nodes.contains(source)) {
+    missing["source_found"] = false;
+    missing["source_suggestions"] = suggest_similar(graph, source_key);
+  }
+  if (!by_id_nodes.contains(target)) {
+    missing["target_found"] = false;
+    missing["target_suggestions"] = suggest_similar(graph, target_key);
+  }
   std::unordered_map<std::string, std::vector<std::string>> adjacency;
   for (const auto& edge : graph.edges) {
     adjacency[edge.source].push_back(edge.target);
@@ -523,7 +732,9 @@ struct Snippet {
 
   auto path = nlohmann::json::array();
   if (!previous.contains(target)) {
-    return {{"path", path}, {"path_nodes", nlohmann::json::array()}};
+    nlohmann::json result{{"path", path}, {"path_nodes", nlohmann::json::array()}};
+    result.update(missing);
+    return result;
   }
 
   std::vector<std::string> reversed;
@@ -534,17 +745,47 @@ struct Snippet {
 
   // `path` stays a bare id list for existing consumers; `path_nodes` carries the
   // label/kind/source_file/line for each hop so an agent can read the route.
-  const auto by_id = index_nodes(graph);
   auto path_nodes = nlohmann::json::array();
   for (const auto& item : reversed) {
     path.push_back(item);
-    if (const auto it = by_id.find(item); it != by_id.end()) {
+    if (const auto it = by_id_nodes.find(item); it != by_id_nodes.end()) {
       path_nodes.push_back(node_brief(*it->second));
     } else {
       path_nodes.push_back({{"id", item}});
     }
   }
-  return {{"path", std::move(path)}, {"path_nodes", std::move(path_nodes)}};
+  nlohmann::json result{{"path", std::move(path)}, {"path_nodes", std::move(path_nodes)}};
+  result.update(missing);
+  return result;
+}
+
+// Agent-facing build-state label. "building" covers the Empty snapshot the
+// daemon serves while the initial build runs on its worker thread.
+[[nodiscard]] const char* build_state_label(BuildState value) {
+  switch (value) {
+    case BuildState::Empty:
+      return "building";
+    case BuildState::DeterministicReady:
+      return "ready";
+    case BuildState::Enriching:
+      return "enriching";
+    case BuildState::Idle:
+      return "idle";
+    case BuildState::Failed:
+      return "failed";
+  }
+  return "failed";
+}
+
+// While the initial build is still running, every read op serves the empty
+// snapshot; stamp those results so an agent can tell "no match" from "not
+// built yet" instead of silently falling back to grep.
+[[nodiscard]] nlohmann::json annotate_build_state(nlohmann::json result, const GraphSnapshot& graph) {
+  if (graph.build_state == BuildState::Empty) {
+    result["graph_state"] = "building";
+    result["note"] = "graph build in progress; results may be empty or incomplete - retry shortly or poll status";
+  }
+  return result;
 }
 
 [[nodiscard]] nlohmann::json status(const DaemonState& state, const GraphSnapshot& graph) {
@@ -569,7 +810,7 @@ struct Snippet {
       {"uptime_seconds", state.uptime_seconds},
       {"node_count", graph.nodes.size()},
       {"edge_count", graph.edges.size()},
-      {"build_state", static_cast<int>(graph.build_state)},
+      {"build_state", build_state_label(graph.build_state)},
       {"cache_hit_rate", graph.cache_hit_rate},
       {"enrichment_state", enrichment_state(state.enrichment_state)},
       {"enrichment_pending", state.enrichment_pending},
@@ -608,19 +849,19 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
   const auto graph = read_graph_snapshot(state);
 
   if (op == "query") {
-    return ok_response(query_graph(*graph, params));
+    return ok_response(annotate_build_state(query_graph(*graph, params), *graph));
   }
   if (op == "path") {
-    return ok_response(shortest_path(*graph, params));
+    return ok_response(annotate_build_state(shortest_path(*graph, params), *graph));
   }
   if (op == "explain") {
-    return ok_response(explain_node(*graph, params));
+    return ok_response(annotate_build_state(explain_node(*graph, params), *graph));
   }
   if (op == "impact") {
-    return ok_response(impact_radius(*graph, params));
+    return ok_response(annotate_build_state(impact_radius(*graph, params), *graph));
   }
   if (op == "context") {
-    return ok_response(pack_context(*graph, params));
+    return ok_response(annotate_build_state(pack_context(*graph, params), *graph));
   }
   if (op == "update") {
     if (state.update_handler) {
