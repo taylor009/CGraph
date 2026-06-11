@@ -7,6 +7,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace cgraph {
 namespace {
@@ -1128,6 +1129,15 @@ std::string export_graph_svg(const GraphSnapshot& graph) {
 }
 
 std::string export_obsidian_markdown(const GraphSnapshot& graph) {
+  // Index outgoing edge targets by source in a single pass over edges. Iterating
+  // edges in order preserves the per-node link ordering of the original
+  // O(nodes * edges) scan, so the output stays byte-identical.
+  std::unordered_map<std::string, std::vector<std::string>> targets_by_source;
+  targets_by_source.reserve(graph.nodes.size());
+  for (const auto& edge : graph.edges) {
+    targets_by_source[edge.source].push_back(edge.target);
+  }
+
   std::ostringstream output;
   for (const auto& node : graph.nodes) {
     output << "# " << node.label << "\n\n";
@@ -1135,15 +1145,13 @@ std::string export_obsidian_markdown(const GraphSnapshot& graph) {
     output << "- kind: `" << node.kind << "`\n";
     output << "- source: `" << node.source_file << "`\n";
     output << "- links:";
-    bool wrote = false;
-    for (const auto& edge : graph.edges) {
-      if (edge.source == node.id) {
-        output << " [[" << edge.target << "]]";
-        wrote = true;
-      }
-    }
-    if (!wrote) {
+    const auto it = targets_by_source.find(node.id);
+    if (it == targets_by_source.end() || it->second.empty()) {
       output << " none";
+    } else {
+      for (const auto& target : it->second) {
+        output << " [[" << target << "]]";
+      }
     }
     output << "\n\n";
   }
