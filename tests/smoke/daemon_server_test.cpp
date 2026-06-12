@@ -82,6 +82,37 @@ int main() {
   }
   expect(ok, nodes_before >= 2, "initial build published baseline graph");
 
+  // Enrichment re-plan gating: the initial plan runs once after the build; a
+  // code-only `update .` must NOT re-plan (no doc tree walk), but a doc change
+  // must. enrichment_plans_run is the observable: a re-plan increments it.
+  int plans_run = 0;
+  for (int attempt = 0; attempt < 300 && plans_run < 1; ++attempt) {
+    const auto s = request_with_retry(socket_path, cgraph::make_request("status"));
+    plans_run = s ? (*s)["result"].value("enrichment_plans_run", 0) : 0;
+    if (plans_run < 1) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+  expect(ok, plans_run >= 1, "initial enrichment plan ran after build");
+
+  const auto code_update = request_with_retry(socket_path, cgraph::make_request("update", {{"path", "."}}));
+  expect(ok, code_update && (*code_update)["ok"] == true, "code-only update accepted");
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));  // several watcher poll windows
+  const auto after_code = request_with_retry(socket_path, cgraph::make_request("status"));
+  const int plans_after_code = after_code ? (*after_code)["result"].value("enrichment_plans_run", 0) : -1;
+  expect(ok, plans_after_code == plans_run, "code-only rescan did not re-plan enrichment");
+
+  write_file(root / "notes.md", "# Notes\nsome documentation\n");
+  bool replanned = false;
+  for (int attempt = 0; attempt < 600 && !replanned; ++attempt) {
+    const auto s = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("status"));
+    replanned = s && (*s)["result"].value("enrichment_plans_run", 0) > plans_run;
+    if (!replanned) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+  expect(ok, replanned, "doc change triggered an enrichment re-plan");
+
   // Add a new source file, then `update .` must rescan and grow the graph.
   write_file(root / "src" / "beta.ts", "export function beta() { return alpha(); }\n");
   const auto update = request_with_retry(socket_path, cgraph::make_request("update", {{"path", "."}}));

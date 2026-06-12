@@ -34,6 +34,9 @@ struct DaemonState {
   std::size_t enrichment_running = 0;
   std::size_t enrichment_stale = 0;
   std::size_t enrichment_failed = 0;
+  // How many enrichment re-plans the daemon has run. A code-only build/rescan
+  // must not increment this; only the initial plan and doc/media changes do.
+  std::size_t enrichment_plans_run = 0;
   // Operation stats accumulated at the request-dispatch boundary: since-boot
   // lifetime totals plus a rolling recent window.
   DaemonOpStats op_stats;

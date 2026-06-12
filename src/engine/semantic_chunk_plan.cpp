@@ -4,10 +4,25 @@
 #include "cgraph/file_watcher.hpp"
 #include "cgraph/path_ignore.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
+#include <cstdint>
+#include <fstream>
+#include <optional>
 
 namespace cgraph {
 namespace {
+
+// file_time_type <-> integer ticks, matching the code-side index manifest
+// serialization so the same FileCacheEntry round-trips identically.
+[[nodiscard]] std::int64_t mtime_count(const std::filesystem::file_time_type& time) {
+  return static_cast<std::int64_t>(time.time_since_epoch().count());
+}
+
+[[nodiscard]] std::filesystem::file_time_type mtime_from_count(std::int64_t count) {
+  return std::filesystem::file_time_type(std::filesystem::file_time_type::duration(count));
+}
 
 [[nodiscard]] bool is_excluded_dir(
     const std::filesystem::path& dir,
@@ -97,13 +112,38 @@ void flush_chunk(SemanticChunkPlan& plan, SemanticChunk& chunk, std::uintmax_t& 
 SemanticChunkPlan plan_semantic_chunks(
     const std::filesystem::path& root,
     const SemanticCache& cache,
-    SemanticChunkPlanOptions options) {
+    SemanticChunkPlanOptions options,
+    SemanticStatIndex* stat_index) {
   SemanticChunkPlan plan;
   SemanticChunk current_chunk;
   std::uintmax_t current_bytes = 0;
 
+  // When no caller-owned index is supplied (cold one-shot), use a throwaway so
+  // the loop stays a single path: a missing entry classifies as New and hashes,
+  // exactly the prior behavior.
+  SemanticStatIndex local_index;
+  SemanticStatIndex& index = stat_index != nullptr ? *stat_index : local_index;
+
   for (const auto& path : collect_semantic_paths(root, options.excluded_dirs)) {
-    const auto hash = sha256_file_hex(path);
+    const auto key = path.generic_string();
+    std::optional<FileCacheEntry> previous;
+    if (const auto it = index.find(key); it != index.end()) {
+      previous = it->second;
+    }
+    // Stat first: a StatHit reuses the stored hash with no read; only new or
+    // changed files are read and SHA-256'd.
+    const auto classification = classify_cached_file(path, previous);
+    if (classification.state == CacheState::Deleted || !classification.current.has_value()) {
+      continue;  // vanished between walk and stat
+    }
+    if (classification.hash_computed) {
+      ++plan.files_hashed;
+    } else {
+      ++plan.files_stat_reused;
+    }
+    index[key] = *classification.current;
+
+    const auto& hash = classification.current->sha256;
     const auto cached = cache.find_by_content_hash(hash);
     if (cached.has_value() && is_valid_cached_record(*cached)) {
       ++plan.cache_hits;
@@ -113,15 +153,12 @@ SemanticChunkPlan plan_semantic_chunks(
       ++plan.stale_inputs;
     }
 
-    std::error_code error;
-    const auto size = std::filesystem::file_size(path, error);
     const auto input = SemanticInput{
         .path = path,
         .kind = semantic_kind_for(path),
         .content_hash = hash,
-        .size = error ? 0 : size,
+        .size = classification.current->size,
     };
-    error.clear();
 
     const auto would_exceed_file_count =
         options.max_files_per_chunk > 0 && current_chunk.inputs.size() >= options.max_files_per_chunk;
@@ -138,6 +175,53 @@ SemanticChunkPlan plan_semantic_chunks(
 
   flush_chunk(plan, current_chunk, current_bytes);
   return plan;
+}
+
+void write_semantic_stat_index(const SemanticStatIndex& index, const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  // Emit in sorted key order so the file is deterministic across writes.
+  std::vector<std::string> keys;
+  keys.reserve(index.size());
+  for (const auto& [key, _] : index) {
+    keys.push_back(key);
+  }
+  std::ranges::sort(keys);
+
+  auto entries = nlohmann::json::array();
+  for (const auto& key : keys) {
+    const auto& entry = index.at(key);
+    entries.push_back({
+        {"path", entry.path.generic_string()},
+        {"size", entry.size},
+        {"modified_at", mtime_count(entry.modified_at)},
+        {"sha256", entry.sha256},
+    });
+  }
+  std::ofstream output(path, std::ios::binary);
+  output << nlohmann::json{{"version", 1}, {"entries", std::move(entries)}}.dump(2);
+}
+
+SemanticStatIndex read_semantic_stat_index(const std::filesystem::path& path) {
+  SemanticStatIndex index;
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    return index;  // absent -> cold, no error
+  }
+  const auto root = nlohmann::json::parse(input, nullptr, false);
+  if (!root.is_object() || !root.contains("entries") || !root["entries"].is_array()) {
+    return index;  // malformed -> cold, no error
+  }
+  for (const auto& item : root["entries"]) {
+    FileCacheEntry entry;
+    entry.path = std::filesystem::path(item.value("path", std::string{}));
+    entry.size = item.value("size", std::uintmax_t{0});
+    entry.modified_at = mtime_from_count(item.value("modified_at", std::int64_t{0}));
+    entry.sha256 = item.value("sha256", std::string{});
+    if (!entry.path.empty() && !entry.sha256.empty()) {
+      index.emplace(entry.path.generic_string(), std::move(entry));
+    }
+  }
+  return index;
 }
 
 }  // namespace cgraph

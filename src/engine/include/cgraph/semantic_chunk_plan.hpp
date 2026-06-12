@@ -1,12 +1,21 @@
 #pragma once
 
+#include "cgraph/file_cache.hpp"
 #include "cgraph/semantic_cache.hpp"
 
 #include <cstdint>
 #include <filesystem>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace cgraph {
+
+// Per-source stat cache for the enrichment plan: path (generic string) -> last
+// seen {size, modified_at, sha256}. Lets planning reuse a stored hash when a
+// file's size and mtime are unchanged, instead of re-reading and re-hashing it.
+// Same primitive the deterministic code path uses (FileCacheEntry / StatHit).
+using SemanticStatIndex = std::unordered_map<std::string, FileCacheEntry>;
 
 enum class SemanticInputKind {
   Document,
@@ -29,6 +38,10 @@ struct SemanticChunkPlan {
   std::vector<SemanticChunk> chunks;
   std::size_t cache_hits = 0;
   std::size_t stale_inputs = 0;
+  // Observability for the stat cache: how many files were read + hashed this
+  // plan vs. reused from a stat hit (the work avoided).
+  std::size_t files_hashed = 0;
+  std::size_t files_stat_reused = 0;
 };
 
 struct SemanticChunkPlanOptions {
@@ -40,9 +53,17 @@ struct SemanticChunkPlanOptions {
   std::vector<std::filesystem::path> excluded_dirs;
 };
 
+// When `stat_index` is non-null, planning consults it to skip re-hashing
+// unchanged files and updates it in place with the entries seen this pass. When
+// null, every file is hashed (cold behavior). The produced plan is identical
+// either way for a given tree + cache.
 [[nodiscard]] SemanticChunkPlan plan_semantic_chunks(
     const std::filesystem::path& root,
     const SemanticCache& cache,
-    SemanticChunkPlanOptions options = {});
+    SemanticChunkPlanOptions options = {},
+    SemanticStatIndex* stat_index = nullptr);
+
+void write_semantic_stat_index(const SemanticStatIndex& index, const std::filesystem::path& path);
+[[nodiscard]] SemanticStatIndex read_semantic_stat_index(const std::filesystem::path& path);
 
 }  // namespace cgraph

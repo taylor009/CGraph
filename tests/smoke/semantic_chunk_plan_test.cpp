@@ -89,6 +89,60 @@ int main() {
     }
   }
 
+  // --- Stat cache: unchanged files are not re-hashed across plans ------------
+  // Plan over a clean tree (empty cache, fresh index): every file is hashed.
+  const auto stat_root = std::filesystem::weakly_canonical(
+      std::filesystem::temp_directory_path() / "cgraph-semantic-statcache-test");
+  std::filesystem::remove_all(stat_root);
+  write_file(stat_root / "a.md", "# A\n");
+  write_file(stat_root / "b.md", "# B\n");
+  write_file(stat_root / "c.md", "# C\n");
+
+  cgraph::SemanticCache empty_cache;
+  cgraph::SemanticStatIndex index;
+  const auto cold = cgraph::plan_semantic_chunks(stat_root, empty_cache, {}, &index);
+  if (cold.files_hashed != 3 || cold.files_stat_reused != 0 || index.size() != 3) {
+    return 2;  // cold plan hashes everything
+  }
+
+  // Second plan, nothing changed: all three reuse their stored hash, none read.
+  const auto warm = cgraph::plan_semantic_chunks(stat_root, empty_cache, {}, &index);
+  if (warm.files_hashed != 0 || warm.files_stat_reused != 3) {
+    return 3;  // unchanged files must not be re-hashed
+  }
+  // Plan output identical whether hashed or reused.
+  if (planned_paths(warm) != planned_paths(cold) || warm.chunks.size() != cold.chunks.size() ||
+      warm.cache_hits != cold.cache_hits || warm.stale_inputs != cold.stale_inputs) {
+    return 4;
+  }
+
+  // Change one file's content (bumping size/mtime): only it is re-hashed.
+  write_file(stat_root / "b.md", "# B changed, now longer\n");
+  const auto after_edit = cgraph::plan_semantic_chunks(stat_root, empty_cache, {}, &index);
+  if (after_edit.files_hashed != 1 || after_edit.files_stat_reused != 2) {
+    return 5;
+  }
+
+  // --- Persistence: index round-trips and a reloaded index reuses all --------
+  const auto index_path = stat_root / "stat-index.json";
+  cgraph::write_semantic_stat_index(index, index_path);
+  auto reloaded = cgraph::read_semantic_stat_index(index_path);
+  if (reloaded.size() != index.size()) {
+    return 6;
+  }
+  const auto after_reload = cgraph::plan_semantic_chunks(stat_root, empty_cache, {}, &reloaded);
+  if (after_reload.files_hashed != 0 || after_reload.files_stat_reused != 3) {
+    return 7;  // a restart over an unchanged tree re-hashes nothing
+  }
+
+  // Absent index file is treated as cold (no error), hashing everything.
+  auto absent = cgraph::read_semantic_stat_index(stat_root / "does-not-exist.json");
+  const auto cold_again = cgraph::plan_semantic_chunks(stat_root, empty_cache, {}, &absent);
+  if (cold_again.files_hashed != 3 || cold_again.files_stat_reused != 0) {
+    return 8;
+  }
+
+  std::filesystem::remove_all(stat_root);
   std::filesystem::remove_all(root);
   return 0;
 }

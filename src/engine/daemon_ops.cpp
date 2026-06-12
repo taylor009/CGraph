@@ -819,6 +819,7 @@ struct Snippet {
       {"enrichment_running", state.enrichment_running},
       {"enrichment_stale", state.enrichment_stale},
       {"enrichment_failed", state.enrichment_failed},
+      {"enrichment_plans_run", state.enrichment_plans_run},
       {"watching", state.watching},
       {"incremental_updates", state.incremental_updates},
       {"ops", op_stats_json(state.op_stats)},

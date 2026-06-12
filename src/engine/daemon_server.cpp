@@ -182,6 +182,11 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
                             : options.drop_dir;
   const auto cache_path = drop_dir / "semantic-cache.json";
   SemanticCache cache = read_semantic_cache(cache_path);
+  // Stat cache for the enrichment plan walk: lets a refresh reuse stored hashes
+  // for unchanged docs/media instead of re-reading and re-hashing every file.
+  // Persisted next to the semantic cache so a restart stays cheap.
+  const auto stat_index_path = drop_dir / "semantic-stat-index.json";
+  SemanticStatIndex stat_index = read_semantic_stat_index(stat_index_path);
   SemanticFragmentDropWatcher drop_watcher(drop_dir);
 
   // Enrichment planning (plan_semantic_chunks) walks the whole project and
@@ -197,26 +202,39 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
 
   const auto run_enrichment_refresh = [&]() {
     SemanticCache snapshot;
+    SemanticStatIndex index_snapshot;
     {
       const std::scoped_lock lock(graph_mutex);
-      snapshot = cache;  // quick copy; release before the slow walk
+      snapshot = cache;              // quick copies; release before the slow walk
+      index_snapshot = stat_index;
     }
     SemanticChunkPlanOptions plan_options;
     plan_options.excluded_dirs = {drop_dir};
     if (drop_dir.has_parent_path()) {
       plan_options.excluded_dirs.push_back(drop_dir.parent_path());
     }
-    const auto plan = plan_semantic_chunks(identity.project_root, snapshot, plan_options);
+    // The plan reuses stored hashes for unchanged files (StatHit) and updates the
+    // snapshot index in place with what it saw this pass.
+    const auto plan = plan_semantic_chunks(identity.project_root, snapshot, plan_options, &index_snapshot);
     std::size_t pending = 0;
     for (const auto& chunk : plan.chunks) {
       pending += chunk.inputs.size();
     }
-    const std::scoped_lock lock(graph_mutex);
-    state.enrichment_pending = pending;
-    state.enrichment_stale = plan.stale_inputs;
-    state.enrichment_state = state.enrichment_failed > 0  ? EnrichmentState::Failed
-                             : pending > 0                ? EnrichmentState::Pending
-                                                          : EnrichmentState::Idle;
+    {
+      const std::scoped_lock lock(graph_mutex);
+      stat_index = index_snapshot;  // publish the refreshed stat entries
+      ++state.enrichment_plans_run;
+      state.enrichment_pending = pending;
+      state.enrichment_stale = plan.stale_inputs;
+      state.enrichment_state = state.enrichment_failed > 0  ? EnrichmentState::Failed
+                               : pending > 0                ? EnrichmentState::Pending
+                                                            : EnrichmentState::Idle;
+    }
+    // Persist only when something was newly hashed (the index meaningfully
+    // changed); a pure stat-hit pass leaves the file untouched.
+    if (plan.files_hashed > 0) {
+      write_semantic_stat_index(index_snapshot, stat_index_path);
+    }
   };
 
   const auto request_refresh = [&]() {
@@ -322,7 +340,9 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     // enrichment planning, which walks the whole project and can take seconds on
     // a large repo. The Tier-1 cache should land promptly, not behind planning.
     persist_graph_and_manifest();
-    request_refresh();
+    // No enrichment re-plan here: a rescan is a code-only operation and does not
+    // change the doc/media set. The plan runs once at startup and thereafter only
+    // on doc/media watcher events, so an `update .` no longer walks the doc tree.
     const auto graph = read_graph_snapshot(state);
     return nlohmann::json{
         {"accepted", true},
@@ -355,7 +375,6 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     // Log the fast-path load immediately — before enrichment planning, which
     // walks the whole project and can take seconds.
     std::cerr << "graphd: loaded persisted graph (" << detected.size() << " files unchanged)\n";
-    request_refresh();
     return true;
   };
   state.update_handler = [&](const nlohmann::json&) {
@@ -392,6 +411,10 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
       if (!try_load_persisted()) {
         (void)rescan();
       }
+      // Plan enrichment exactly once after the initial build/load to populate the
+      // pending/stale counts. Thereafter only doc/media changes (and drop ingests)
+      // re-plan; a code-only rescan does not.
+      request_refresh();
       initial_build_done.store(true);  // hands the watcher to the serve loop
     });
   }

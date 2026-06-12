@@ -20,6 +20,7 @@ namespace fs = std::filesystem;
 
 constexpr const char* kManifestName = "plan.json";
 constexpr const char* kCacheName = "semantic-cache.json";
+constexpr const char* kStatIndexName = "semantic-stat-index.json";
 
 [[nodiscard]] const char* kind_name(SemanticInputKind kind) {
   return kind == SemanticInputKind::Media ? "media" : "document";
@@ -72,7 +73,11 @@ EnrichmentPlanResult plan_enrichment(const std::filesystem::path& root, const st
   if (drop_dir.has_parent_path()) {
     options.excluded_dirs.push_back(drop_dir.parent_path());
   }
-  result.plan = plan_semantic_chunks(root, cache, options);
+  // Stat cache persisted in the drop dir, so repeated one-shot plans reuse hashes
+  // for unchanged docs/media instead of re-reading every file each run.
+  auto stat_index = read_semantic_stat_index(drop_dir / kStatIndexName);
+  result.plan = plan_semantic_chunks(root, cache, options, &stat_index);
+  write_semantic_stat_index(stat_index, drop_dir / kStatIndexName);
 
   // Fragment filenames are derived from a chunk index. The plan re-numbers from
   // zero every pass (only uncached chunks appear), so naming files by the

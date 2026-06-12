@@ -70,6 +70,8 @@ int run_enrich_plan(const Args& args) {
   std::cerr << "semantic plan: " << plan.plan.chunks.size() << " chunk(s), "
             << plan.inputs_to_enrich << " input(s) to enrich, " << plan.plan.cache_hits
             << " cache hit(s), " << plan.plan.stale_inputs << " stale\n";
+  std::cerr << "stat cache: " << plan.plan.files_hashed << " file(s) hashed, "
+            << plan.plan.files_stat_reused << " reused (unchanged)\n";
   std::cerr << "drop computed fragments into: " << plan.drop_dir << '\n';
   std::cerr << "manifest: " << plan.manifest_path << '\n';
   return 0;
