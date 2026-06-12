@@ -512,6 +512,18 @@ cgraph_enable_sanitizers(cgraph_pipeline_test)
 
 add_test(NAME cgraph_pipeline_test COMMAND cgraph_pipeline_test)
 
+add_executable(cgraph_operation_stats_test
+  operation_stats_test.cpp)
+
+target_link_libraries(cgraph_operation_stats_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_operation_stats_test)
+cgraph_enable_sanitizers(cgraph_operation_stats_test)
+
+add_test(NAME cgraph_operation_stats_test COMMAND cgraph_operation_stats_test)
+
 add_test(
   NAME cgraph_cli_one_shot_test
   COMMAND cgraph

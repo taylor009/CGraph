@@ -31,6 +31,7 @@ struct IncrementalDedupPolicy {
 
 struct IncrementalUpdateResult {
   std::size_t files_reextracted = 0;
+  std::size_t files_cache_hit = 0;  // reused from the warm index (no re-parse)
   std::size_t files_removed = 0;
   bool neighborhood_deduped = false;
   bool full_dedup_reconciled = false;

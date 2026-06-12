@@ -805,9 +805,11 @@ struct Snippet {
     return "failed";
   };
 
-  return {
+  const std::chrono::duration<double> uptime = StatsClock::now() - state.start_time;
+
+  nlohmann::json payload{
       {"pid", state.pid},
-      {"uptime_seconds", state.uptime_seconds},
+      {"uptime_seconds", uptime.count()},
       {"node_count", graph.nodes.size()},
       {"edge_count", graph.edges.size()},
       {"build_state", build_state_label(graph.build_state)},
@@ -819,7 +821,16 @@ struct Snippet {
       {"enrichment_failed", state.enrichment_failed},
       {"watching", state.watching},
       {"incremental_updates", state.incremental_updates},
+      {"ops", op_stats_json(state.op_stats)},
   };
+  // Modeled cache saving = files_reused x mean(per-file extract time) from the
+  // most recent build's Layer A timings. Omitted (never fabricated) when there
+  // was no reuse or no per-file mean to model from.
+  if (state.last_files_cache_hit > 0 && state.last_extract_mean_ms > 0.0) {
+    payload["cache_saved_ms_estimate"] =
+        static_cast<double>(state.last_files_cache_hit) * state.last_extract_mean_ms;
+  }
+  return payload;
 }
 
 }  // namespace
@@ -850,35 +861,55 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
   const auto params = request.value("params", nlohmann::json::object());
   const auto graph = read_graph_snapshot(state);
 
-  if (op == "query") {
-    return ok_response(annotate_build_state(query_graph(*graph, params), *graph));
+  const auto known_op = daemon_op_from_string(op);
+  if (!known_op) {
+    return error_response("unknown op: " + op);
   }
-  if (op == "path") {
-    return ok_response(annotate_build_state(shortest_path(*graph, params), *graph));
-  }
-  if (op == "explain") {
-    return ok_response(annotate_build_state(explain_node(*graph, params), *graph));
-  }
-  if (op == "impact") {
-    return ok_response(annotate_build_state(impact_radius(*graph, params), *graph));
-  }
-  if (op == "context") {
-    return ok_response(annotate_build_state(pack_context(*graph, params), *graph));
-  }
-  if (op == "update") {
-    if (state.update_handler) {
-      return ok_response(state.update_handler(params));
+
+  // Time the op at the dispatch boundary and record into op_stats. A query with
+  // zero total matches is the "zero hit" signal that distinguishes useful work
+  // from a daemon that is answering but finding nothing.
+  double latency_ms = 0.0;
+  bool zero_hit = false;
+  nlohmann::json response;
+  {
+    ScopedTimer timer(&latency_ms);
+    switch (*known_op) {
+      case DaemonOp::Query: {
+        auto result = query_graph(*graph, params);
+        zero_hit = result.value("total", std::size_t{0}) == 0;
+        response = ok_response(annotate_build_state(std::move(result), *graph));
+        break;
+      }
+      case DaemonOp::Path:
+        response = ok_response(annotate_build_state(shortest_path(*graph, params), *graph));
+        break;
+      case DaemonOp::Explain:
+        response = ok_response(annotate_build_state(explain_node(*graph, params), *graph));
+        break;
+      case DaemonOp::Impact:
+        response = ok_response(annotate_build_state(impact_radius(*graph, params), *graph));
+        break;
+      case DaemonOp::Context:
+        response = ok_response(annotate_build_state(pack_context(*graph, params), *graph));
+        break;
+      case DaemonOp::Update:
+        response = state.update_handler ? ok_response(state.update_handler(params))
+                                        : ok_response({{"accepted", true}});
+        break;
+      case DaemonOp::Status:
+        response = ok_response(status(state, *graph));
+        break;
+      case DaemonOp::Shutdown:
+        state.shutdown_requested = true;
+        response = ok_response({{"shutdown", true}});
+        break;
+      case DaemonOp::Count:
+        break;  // unreachable: daemon_op_from_string never yields Count
     }
-    return ok_response({{"accepted", true}});
   }
-  if (op == "status") {
-    return ok_response(status(state, *graph));
-  }
-  if (op == "shutdown") {
-    state.shutdown_requested = true;
-    return ok_response({{"shutdown", true}});
-  }
-  return error_response("unknown op: " + op);
+  state.op_stats.record(*known_op, latency_ms, zero_hit);
+  return response;
 }
 
 }  // namespace cgraph

@@ -100,6 +100,7 @@ IncrementalUpdateResult full_stat_index_rescan(
       if (const auto existing = index.files.find(key); existing != index.files.end()) {
         rescanned.emplace(key, std::move(existing->second));
         rescanned_cache.emplace(key, *classification.current);
+        ++result.files_cache_hit;
         continue;
       }
     }
@@ -107,13 +108,19 @@ IncrementalUpdateResult full_stat_index_rescan(
     to_extract.push_back(file);
   }
 
-  // Re-extract only the changed/new files, concurrently.
-  auto extractions = extract_files(to_extract);
-  for (std::size_t i = 0; i < to_extract.size(); ++i) {
-    auto& extraction = extractions[i];
-    result.warnings.insert(result.warnings.end(), extraction.fragment.warnings.begin(), extraction.fragment.warnings.end());
-    rescanned.emplace(key_for(to_extract[i].path), std::move(extraction));
-    ++result.files_reextracted;
+  // Re-extract only the changed/new files, concurrently. Time the extraction so
+  // the modeled cache saving (files_reused x mean per-file extract time) can be
+  // derived from real numbers in status.
+  double extract_ms = 0.0;
+  {
+    ScopedTimer timer(&extract_ms);
+    auto extractions = extract_files(to_extract);
+    for (std::size_t i = 0; i < to_extract.size(); ++i) {
+      auto& extraction = extractions[i];
+      result.warnings.insert(result.warnings.end(), extraction.fragment.warnings.begin(), extraction.fragment.warnings.end());
+      rescanned.emplace(key_for(to_extract[i].path), std::move(extraction));
+      ++result.files_reextracted;
+    }
   }
 
   for (const auto& [key, _] : index.files) {
@@ -127,10 +134,20 @@ IncrementalUpdateResult full_stat_index_rescan(
   index.updates_since_full_dedup = 0;
   index.aliases = load_path_aliases(root);
 
+  const std::size_t files_total = result.files_reextracted + result.files_cache_hit;
+
   auto graph = rebuild_graph(index);
   semantic_dedup(graph, dedup_policy.options);
   finalize_graph(graph);  // communities + centrality on the deduped graph
+  graph.cache_hit_rate = cache_hit_rate(result.files_cache_hit, files_total);
   result.full_dedup_reconciled = true;
+
+  // Record this build's Layer A inputs for the modeled cache-saving estimate.
+  // Mean is left 0 (estimate suppressed) when nothing was extracted this build.
+  state.last_files_cache_hit = result.files_cache_hit;
+  state.last_extract_mean_ms =
+      result.files_reextracted == 0 ? 0.0 : extract_ms / static_cast<double>(result.files_reextracted);
+
   publish_graph_snapshot(state, std::move(graph));
   return result;
 }

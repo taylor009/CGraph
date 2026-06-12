@@ -1,8 +1,10 @@
 #include "cgraph/engine.hpp"
+#include "cgraph/operation_stats.hpp"
 #include "cgraph/pipeline.hpp"
 #include "cgraph/semantic_orchestration.hpp"
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -48,7 +50,15 @@ struct Args {
 int run_build(const Args& args) {
   const auto result = cgraph::run_one_shot(args.root);
   cgraph::write_exports(result.graph, args.output);
+
+  // Sidecar stats.json (durable, diffable) deliberately kept out of graph.json
+  // so the Graphify node-link parity golden stays byte-identical.
+  std::filesystem::create_directories(args.output);
+  std::ofstream stats_out(args.output / "stats.json", std::ios::binary);
+  stats_out << cgraph::build_stats_json(result.stats).dump(2);
+
   std::cerr << "processed " << result.file_count << " files, wrote exports to " << args.output << '\n';
+  std::cerr << "build: " << cgraph::build_stats_summary(result.stats) << '\n';
   for (const auto& warning : result.warnings) {
     std::cerr << "warning: " << warning << '\n';
   }

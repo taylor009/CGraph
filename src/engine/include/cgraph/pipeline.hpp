@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cgraph/operation_stats.hpp"
 #include "cgraph/types.hpp"
 
 #include <filesystem>
@@ -10,6 +11,7 @@ struct PipelineResult {
   GraphSnapshot graph;
   std::size_t file_count = 0;
   std::vector<std::string> warnings;
+  BuildStats stats;
 };
 
 [[nodiscard]] PipelineResult run_one_shot(const std::filesystem::path& root);

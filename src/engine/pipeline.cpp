@@ -25,33 +25,61 @@ PipelineResult run_one_shot(const std::filesystem::path& root) {
   PipelineResult result;
   const auto files = detect_project_files(root);
   result.file_count = files.size();
+  // A one-shot build is a cold build: every file is extracted, none reused.
+  result.stats.files_total = files.size();
+  result.stats.files_extracted = files.size();
+  result.stats.files_cache_hit = 0;
 
   std::vector<Fragment> fragments;
   std::vector<RawCall> raw_calls;
   std::vector<RawRelation> raw_relations;
   fragments.reserve(files.size());
 
-  // Extract concurrently; the results come back in detection order, so merging
-  // them below is identical to the serial path (parity preserved).
-  auto extractions = extract_files(files);
-  for (auto& extraction : extractions) {
-    result.warnings.insert(result.warnings.end(), extraction.fragment.warnings.begin(), extraction.fragment.warnings.end());
-    raw_calls.insert(raw_calls.end(), extraction.raw_calls.begin(), extraction.raw_calls.end());
-    raw_relations.insert(raw_relations.end(), extraction.raw_relations.begin(), extraction.raw_relations.end());
-    fragments.push_back(std::move(extraction.fragment));
+  // Time each phase at the orchestration seam (scoped timers), so instrumentation
+  // stays here rather than threaded into every extractor/builder/dedup function.
+  {
+    ScopedTimer timer(&result.stats.extract_ms);
+    // Extract concurrently; the results come back in detection order, so merging
+    // them below is identical to the serial path (parity preserved).
+    auto extractions = extract_files(files);
+    for (auto& extraction : extractions) {
+      result.warnings.insert(result.warnings.end(), extraction.fragment.warnings.begin(), extraction.fragment.warnings.end());
+      raw_calls.insert(raw_calls.end(), extraction.raw_calls.begin(), extraction.raw_calls.end());
+      raw_relations.insert(raw_relations.end(), extraction.raw_relations.begin(), extraction.raw_relations.end());
+      fragments.push_back(std::move(extraction.fragment));
+    }
   }
 
-  result.graph = merge_fragments(fragments);
-  const auto aliases = load_path_aliases(root);
-  resolve_imports(result.graph, aliases);
-  resolve_raw_calls(result.graph, raw_calls);
-  resolve_raw_relations(result.graph, raw_relations);
-  semantic_dedup(result.graph);
-  const auto community_result = detect_communities(result.graph);
-  if (community_result.cluster_count == 0 && !result.graph.nodes.empty()) {
-    result.warnings.push_back("community detection produced no clusters");
+  {
+    ScopedTimer timer(&result.stats.merge_ms);
+    result.graph = merge_fragments(fragments);
   }
-  analyze_graph(result.graph);
+  {
+    ScopedTimer timer(&result.stats.resolve_ms);
+    const auto aliases = load_path_aliases(root);
+    resolve_imports(result.graph, aliases);
+    resolve_raw_calls(result.graph, raw_calls);
+    resolve_raw_relations(result.graph, raw_relations);
+  }
+  {
+    ScopedTimer timer(&result.stats.dedup_ms);
+    semantic_dedup(result.graph);
+  }
+  {
+    ScopedTimer timer(&result.stats.communities_ms);
+    const auto community_result = detect_communities(result.graph);
+    if (community_result.cluster_count == 0 && !result.graph.nodes.empty()) {
+      result.warnings.push_back("community detection produced no clusters");
+    }
+  }
+  {
+    ScopedTimer timer(&result.stats.analyze_ms);
+    analyze_graph(result.graph);
+  }
+
+  result.stats.nodes = result.graph.nodes.size();
+  result.stats.edges = result.graph.edges.size();
+  result.graph.cache_hit_rate = cache_hit_rate(result.stats.files_cache_hit, result.stats.files_total);
   return result;
 }
 

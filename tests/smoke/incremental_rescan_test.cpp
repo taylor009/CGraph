@@ -109,6 +109,16 @@ int assert_explicit_rescan_replaces_stat_index() {
     return 1;
   }
 
+  // keep.py was reused, fresh.py re-extracted: one hit of two files -> 0.5, in
+  // (0,1]. The previously-dead cache_hit_rate now carries a real value, and the
+  // modeled-saving inputs are recorded (a hit plus a positive per-file mean).
+  if (result.files_cache_hit != 1 || graph->cache_hit_rate != 0.5) {
+    return 2;
+  }
+  if (state.last_files_cache_hit != 1 || state.last_extract_mean_ms <= 0.0) {
+    return 3;
+  }
+
   std::filesystem::remove_all(root);
   return 0;
 }

@@ -2,8 +2,11 @@
 
 #include "cgraph/protocol.hpp"
 
+#include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 int main() {
   namespace fs = std::filesystem;
@@ -271,6 +274,64 @@ int main() {
   bad["protocol_version"] = 999;
   if (cgraph::handle_daemon_request(state, bad)["ok"].get<bool>()) {
     return 1;
+  }
+
+  // --- operation stats: counts, latency, zero-hit rate, uptime, window ---
+  {
+    cgraph::DaemonState s;
+    cgraph::GraphSnapshot g;
+    g.build_state = cgraph::BuildState::DeterministicReady;
+    g.nodes.push_back(cgraph::Node{.id = "x", .label = "Widget", .kind = "class"});
+    cgraph::publish_graph_snapshot(s, std::move(g));
+
+    for (int i = 0; i < 3; ++i) {
+      cgraph::handle_daemon_request(s, cgraph::make_request("query", {{"q", "widget"}}));  // 3 hits
+    }
+    for (int i = 0; i < 2; ++i) {
+      cgraph::handle_daemon_request(s, cgraph::make_request("query", {{"q", "zzznomatch"}}));  // 2 zero-hit
+    }
+
+    const auto st = cgraph::handle_daemon_request(s, cgraph::make_request("status"))["result"];
+    const auto& ops = st["ops"];
+    if (ops["query_count"] != 5 || ops["query_zero_hits"] != 2) {
+      return 30;
+    }
+    if (std::fabs(ops["query_zero_hit_rate"].get<double>() - 0.4) > 1e-9) {
+      return 31;
+    }
+    if (ops["lifetime"]["query"]["mean_ms"].get<double>() <= 0.0) {
+      return 32;  // a served op took measurable time
+    }
+    if (ops["recent_window"]["size"].get<std::size_t>() > ops["recent_window"]["capacity"].get<std::size_t>()) {
+      return 33;
+    }
+    if (st["uptime_seconds"].get<double>() <= 0.0) {
+      return 34;
+    }
+    // Uptime advances on a later query.
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    const auto st2 = cgraph::handle_daemon_request(s, cgraph::make_request("status"))["result"];
+    if (st2["uptime_seconds"].get<double>() <= st["uptime_seconds"].get<double>()) {
+      return 35;
+    }
+  }
+
+  // --- enrichment running is observable in-flight and clears after ---
+  {
+    cgraph::DaemonState s;
+    cgraph::publish_graph_snapshot(s, cgraph::GraphSnapshot{});
+    {
+      const cgraph::EnrichmentRunningScope running(s, 3);
+      const auto in_flight = cgraph::handle_daemon_request(s, cgraph::make_request("status"))["result"];
+      if (in_flight["enrichment_running"] != 3 ||
+          in_flight.value("enrichment_state", std::string{}) != "running") {
+        return 40;
+      }
+    }
+    const auto after = cgraph::handle_daemon_request(s, cgraph::make_request("status"))["result"];
+    if (after["enrichment_running"] != 0 || after.value("enrichment_state", std::string{}) == "running") {
+      return 41;  // both the count and the running state clear
+    }
   }
 
   return 0;

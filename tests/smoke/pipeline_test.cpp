@@ -1,3 +1,4 @@
+#include "cgraph/operation_stats.hpp"
 #include "cgraph/pipeline.hpp"
 
 #include <filesystem>
@@ -25,6 +26,32 @@ int main() {
   if (result.file_count != 1 || result.graph.nodes.empty()) {
     std::filesystem::remove_all(root);
     return 1;
+  }
+
+  // Layer A: a real build records per-phase timings and counters at the seam.
+  const auto& stats = result.stats;
+  if (stats.total_ms() <= 0.0 || stats.extract_ms <= 0.0 || stats.merge_ms <= 0.0 ||
+      stats.resolve_ms <= 0.0 || stats.dedup_ms <= 0.0 || stats.communities_ms <= 0.0 ||
+      stats.analyze_ms <= 0.0) {
+    std::filesystem::remove_all(root);
+    return 2;  // every phase must have a measured, positive duration
+  }
+  if (stats.nodes != result.graph.nodes.size() || stats.edges != result.graph.edges.size()) {
+    std::filesystem::remove_all(root);
+    return 3;  // counters must match the resulting snapshot
+  }
+  // A cold one-shot build extracts every file and reuses none.
+  if (stats.files_total != 1 || stats.files_extracted != 1 || stats.files_cache_hit != 0 ||
+      result.graph.cache_hit_rate != 0.0) {
+    std::filesystem::remove_all(root);
+    return 4;
+  }
+  // stats.json body is well-formed and omits the saving estimate on a cold build.
+  const auto stats_json = cgraph::build_stats_json(stats);
+  if (stats_json["node_count"] != result.graph.nodes.size() ||
+      stats_json.contains("cache_saved_ms_estimate")) {
+    std::filesystem::remove_all(root);
+    return 5;
   }
 
   cgraph::write_exports(result.graph, out);

@@ -441,6 +441,10 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     if (const auto events = drop_watcher.poll(FileWatcherClock::now()); !events.empty()) {
       const std::scoped_lock lock(graph_mutex);  // serialize with the build/rescan thread
       const auto sources = load_chunk_sources(drop_dir);
+      // Mark the batch in-flight so a concurrent `status` reports enrichment as
+      // running; the scope clears the running count on exit and request_refresh
+      // recomputes the steady state below.
+      const EnrichmentRunningScope running(state, events.size());
       bool merged_any = false;
       for (const auto& event : events) {
         if (event.change == SemanticFragmentDropChange::Deleted) {
