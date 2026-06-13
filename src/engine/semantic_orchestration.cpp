@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -123,7 +124,16 @@ EnrichmentPlanResult plan_enrichment(const std::filesystem::path& root, const st
   // next rebuild, even though the cache still marks the sources enriched. Offset
   // new fragment names past the fragments already dropped so the drop directory
   // accumulates across passes and ingest stays additive.
-  const auto fragment_offset = discover_semantic_fragment_drops(drop_dir).size();
+  //
+  // Offset is one past the HIGHEST existing chunk index, not the count: counting
+  // collides when numbering is non-contiguous (e.g. chunk_00, chunk_05 on disk ->
+  // count 2 -> chunk_02, clobbering nothing here but chunk_05 on a denser dir),
+  // so a partial earlier pass could be silently overwritten. max+1 is always
+  // strictly past every existing fragment.
+  std::size_t fragment_offset = 0;
+  for (const auto& existing : discover_semantic_fragment_drops(drop_dir)) {
+    fragment_offset = std::max(fragment_offset, existing.chunk_index + 1);
+  }
 
   // Candidate doc->code links: built once from the persisted code graph (the
   // output dir is the drop dir's parent). Empty index when no graph.json exists,

@@ -174,6 +174,32 @@ int main() {
     fs::remove_all(croot);
   }
 
+  // --- non-contiguous existing fragments must not collide on a new pass ---
+  // With chunk_00 + chunk_05 on disk (a gap), a count-based offset would yield
+  // chunk_02 and could overwrite a later fragment; max+1 must yield chunk_06+.
+  {
+    const auto groot = fs::temp_directory_path() / "cgraph_fragment_gap_test";
+    fs::remove_all(groot);
+    const auto gdrop = cgraph::default_semantic_drop_dir(groot / "out");
+    write_file(gdrop / "chunk_00.json", R"({"nodes":[],"edges":[]})");
+    write_file(gdrop / "chunk_05.json", R"({"nodes":[],"edges":[]})");
+    write_file(groot / "docs" / "fresh.md", "# Fresh\nA brand new uncached document.\n");
+
+    const auto gap_plan = cgraph::plan_enrichment(groot, gdrop);
+    std::ifstream manifest_file(gap_plan.manifest_path, std::ios::binary);
+    const auto manifest = nlohmann::json::parse(manifest_file, nullptr, false);
+    const auto fragment_name = manifest["chunks"][0].value("fragment", std::string{});
+    // Strictly past the highest existing index (5): chunk_06.json or higher,
+    // and never an existing filename.
+    if (fragment_name != cgraph::fragment_filename_for_chunk(6)) {
+      return 3;
+    }
+    if (fs::exists(gdrop / fragment_name)) {
+      return 4;  // must not collide with anything already on disk
+    }
+    fs::remove_all(groot);
+  }
+
   fs::remove_all(root);
   return 0;
 }
