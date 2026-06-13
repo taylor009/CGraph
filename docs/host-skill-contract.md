@@ -27,6 +27,11 @@ Each chunk contains bounded file inputs with:
 - input kind, such as document or media
 - content hash
 - byte size
+- `candidate_links`: real code-node ids (with labels) that the document mentions, matched
+  deterministically against the code graph. These are suggestions only — ids and labels as
+  evidence, never a relation — so a host can emit `doc -> <code-node-id>` edges connecting prose to
+  code without first discovering the ids itself. The array is empty for media inputs and when no
+  code graph is available to match against; ignoring it leaves a fragment valid.
 
 Hosts dispatch each chunk to their own agent or model workflow. A completed chunk writes exactly one fragment file named `chunk_NN.json` into the configured semantic drop directory, where `NN` is the chunk index. Cached content is skipped when a valid cache record exists for the same content hash and fragment path.
 

@@ -51,6 +51,17 @@ int main() {
     return 1;
   }
 
+  // No <out>/graph.json exists here, so candidate_links degrades to empty and the
+  // plan is otherwise unchanged (additive feature).
+  {
+    std::ifstream manifest_file(plan.manifest_path, std::ios::binary);
+    const auto manifest = nlohmann::json::parse(manifest_file, nullptr, false);
+    const auto& input0 = manifest["chunks"][0]["inputs"][0];
+    if (!input0.contains("candidate_links") || !input0["candidate_links"].empty()) {
+      return 1;  // present but empty when no code graph is available
+    }
+  }
+
   // Host authors the fragment for chunk 0 and drops it.
   const auto fragment = drop / cgraph::fragment_filename_for_chunk(plan.plan.chunks.front().index);
   write_file(fragment, R"({
@@ -123,6 +134,44 @@ int main() {
   }
   if (bad.graph.nodes.size() != bad.deterministic_nodes + 4) {
     return 1;  // rejected fragment adds nothing; the valid ones persist
+  }
+
+  // --- candidate doc->code links: a persisted code graph lets the plan hand the
+  // host real code-node ids for symbols the doc mentions. ---
+  {
+    const auto croot = fs::temp_directory_path() / "cgraph_candidate_links_test";
+    fs::remove_all(croot);
+    const auto cdrop = cgraph::default_semantic_drop_dir(croot / "out");
+    // Persisted code graph with a compound-named symbol node (the <out> dir is
+    // excluded from the doc walk, so graph.json is never planned as a document).
+    write_file(croot / "out" / "graph.json", R"JSON({
+      "directed": true, "multigraph": false, "graph": {},
+      "nodes": [{"id": "code:ccf", "label": "classify_cached_file(path)", "type": "function"}],
+      "links": []
+    })JSON");
+    // A doc that names that symbol.
+    write_file(croot / "docs" / "cache.md", "# Cache\nThe walk calls classify_cached_file before hashing.\n");
+
+    const auto cplan = cgraph::plan_enrichment(croot, cdrop);
+    std::ifstream manifest_file(cplan.manifest_path, std::ios::binary);
+    const auto manifest = nlohmann::json::parse(manifest_file, nullptr, false);
+    bool linked = false;
+    for (const auto& chunk : manifest["chunks"]) {
+      for (const auto& input : chunk["inputs"]) {
+        if (input.value("path", std::string{}).find("cache.md") == std::string::npos) {
+          continue;
+        }
+        for (const auto& link : input.value("candidate_links", nlohmann::json::array())) {
+          if (link.value("id", std::string{}) == "code:ccf") {
+            linked = true;
+          }
+        }
+      }
+    }
+    if (!linked) {
+      return 2;  // the doc's input must carry the real code-node id it mentions
+    }
+    fs::remove_all(croot);
   }
 
   fs::remove_all(root);

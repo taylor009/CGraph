@@ -3,6 +3,7 @@
 #include "cgraph/daemon_ops.hpp"
 #include "cgraph/pipeline.hpp"
 #include "cgraph/semantic_cache.hpp"
+#include "cgraph/semantic_code_links.hpp"
 #include "cgraph/semantic_drop.hpp"
 #include "cgraph/semantic_ingest.hpp"
 
@@ -10,6 +11,7 @@
 
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <sstream>
 #include <unordered_map>
 
@@ -21,9 +23,44 @@ namespace fs = std::filesystem;
 constexpr const char* kManifestName = "plan.json";
 constexpr const char* kCacheName = "semantic-cache.json";
 constexpr const char* kStatIndexName = "semantic-stat-index.json";
+constexpr const char* kGraphName = "graph.json";
 
 [[nodiscard]] const char* kind_name(SemanticInputKind kind) {
   return kind == SemanticInputKind::Media ? "media" : "document";
+}
+
+// Load the persisted code graph from <out>/graph.json so candidate doc->code
+// links can be matched. Empty graph (no candidates) when absent — additive.
+[[nodiscard]] SymbolIndex load_symbol_index(const fs::path& out_dir) {
+  std::ifstream input(out_dir / kGraphName, std::ios::binary);
+  if (!input) {
+    return {};
+  }
+  const auto graph_json = nlohmann::json::parse(input, nullptr, false);
+  if (graph_json.is_discarded()) {
+    return {};
+  }
+  GraphSnapshot graph;
+  for (const auto& node : graph_json.value("nodes", nlohmann::json::array())) {
+    Node parsed;
+    parsed.id = node.value("id", std::string{});
+    parsed.label = node.value("label", parsed.id);
+    parsed.kind = node.value("type", node.value("kind", std::string{}));
+    if (!parsed.id.empty()) {
+      graph.nodes.push_back(std::move(parsed));
+    }
+  }
+  return build_symbol_index(graph);
+}
+
+// Read a document's text for symbol-mention matching. Empty on failure (e.g.
+// media or unreadable), which yields no candidates.
+[[nodiscard]] std::string read_text_file(const fs::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    return {};
+  }
+  return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
 }
 
 }  // namespace
@@ -88,6 +125,11 @@ EnrichmentPlanResult plan_enrichment(const std::filesystem::path& root, const st
   // accumulates across passes and ingest stays additive.
   const auto fragment_offset = discover_semantic_fragment_drops(drop_dir).size();
 
+  // Candidate doc->code links: built once from the persisted code graph (the
+  // output dir is the drop dir's parent). Empty index when no graph.json exists,
+  // so candidate_links degrades to empty and the plan is otherwise unchanged.
+  const auto symbol_index = load_symbol_index(drop_dir.parent_path());
+
   // Manifest: enough for a host to know what to enrich and where to drop each
   // resulting fragment.
   nlohmann::json manifest;
@@ -98,11 +140,20 @@ EnrichmentPlanResult plan_enrichment(const std::filesystem::path& root, const st
     const auto fragment_index = fragment_offset + chunk.index;
     nlohmann::json inputs = nlohmann::json::array();
     for (const auto& input : chunk.inputs) {
+      // Real code-node ids this document mentions, handed to the host so a
+      // doc->code edge is the easy path. Media inputs (no text) get none.
+      auto candidate_links = nlohmann::json::array();
+      if (input.kind == SemanticInputKind::Document) {
+        for (const auto& link : compute_candidate_links(read_text_file(input.path), symbol_index)) {
+          candidate_links.push_back({{"id", link.node_id}, {"label", link.label}});
+        }
+      }
       inputs.push_back({
           {"path", input.path.generic_string()},
           {"kind", kind_name(input.kind)},
           {"content_hash", input.content_hash},
           {"size", input.size},
+          {"candidate_links", std::move(candidate_links)},
       });
       ++result.inputs_to_enrich;
     }
