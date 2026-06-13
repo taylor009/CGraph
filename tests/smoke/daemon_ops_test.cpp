@@ -334,5 +334,34 @@ int main() {
     }
   }
 
+  // --- status reports semantic connectivity ---
+  {
+    cgraph::DaemonState s;
+    cgraph::GraphSnapshot g;
+    g.build_state = cgraph::BuildState::DeterministicReady;
+    g.nodes.push_back(cgraph::Node{.id = "code:fn", .label = "doThing", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{.id = "doc:guide", .label = "Guide", .kind = "document"});
+    g.edges.push_back(cgraph::Edge{.source = "doc:guide", .target = "code:fn", .relation = "DOCUMENTS"});
+    cgraph::publish_graph_snapshot(s, std::move(g));
+    const auto sem = cgraph::handle_daemon_request(s, cgraph::make_request("status"))["result"]["semantic"];
+    if (sem["doc_nodes"] != 1 || sem["connected_docs"] != 1 || sem["doc_code_edges"] != 1) {
+      return 50;
+    }
+    if (sem["connectivity_rate"].get<double>() <= 0.0) {
+      return 51;
+    }
+
+    // A pure-code snapshot reports zero semantic nodes.
+    cgraph::DaemonState s2;
+    cgraph::GraphSnapshot g2;
+    g2.nodes.push_back(cgraph::Node{.id = "code:a", .label = "a", .kind = "function"});
+    cgraph::publish_graph_snapshot(s2, std::move(g2));
+    const auto sem2 = cgraph::handle_daemon_request(s2, cgraph::make_request("status"))["result"]["semantic"];
+    if (sem2["doc_nodes"] != 0 || sem2["concept_nodes"] != 0 ||
+        sem2["connectivity_rate"].get<double>() != 0.0) {
+      return 52;
+    }
+  }
+
   return 0;
 }

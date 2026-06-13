@@ -33,6 +33,7 @@ add_library(cgraph_engine STATIC
   semantic_chunk_plan.cpp
   semantic_cache.cpp
   semantic_code_links.cpp
+  semantic_connectivity.cpp
   semantic_drop.cpp
   semantic_fragment_validation.cpp
   semantic_ingest.cpp

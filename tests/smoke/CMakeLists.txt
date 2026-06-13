@@ -250,6 +250,18 @@ cgraph_enable_sanitizers(cgraph_semantic_code_links_test)
 
 add_test(NAME cgraph_semantic_code_links_test COMMAND cgraph_semantic_code_links_test)
 
+add_executable(cgraph_semantic_connectivity_test
+  semantic_connectivity_test.cpp)
+
+target_link_libraries(cgraph_semantic_connectivity_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_semantic_connectivity_test)
+cgraph_enable_sanitizers(cgraph_semantic_connectivity_test)
+
+add_test(NAME cgraph_semantic_connectivity_test COMMAND cgraph_semantic_connectivity_test)
+
 add_executable(cgraph_semantic_drop_test
   semantic_drop_test.cpp)
 

@@ -1,6 +1,7 @@
 #include "cgraph/daemon_ops.hpp"
 
 #include "cgraph/protocol.hpp"
+#include "cgraph/semantic_connectivity.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -831,6 +832,19 @@ struct Snippet {
     payload["cache_saved_ms_estimate"] =
         static_cast<double>(state.last_files_cache_hit) * state.last_extract_mean_ms;
   }
+
+  // Semantic connectivity: how well the host-authored layer connects to code.
+  // Computed from the current snapshot so it reflects live enrichment.
+  const auto connectivity = compute_semantic_connectivity(graph);
+  payload["semantic"] = {
+      {"doc_nodes", connectivity.doc_nodes},
+      {"concept_nodes", connectivity.concept_nodes},
+      {"connected_docs", connectivity.connected_docs},
+      {"orphan_docs", connectivity.orphan_docs},
+      {"orphan_concepts", connectivity.orphan_concepts},
+      {"doc_code_edges", connectivity.doc_code_edges},
+      {"connectivity_rate", connectivity.connectivity_rate},
+  };
   return payload;
 }
 
