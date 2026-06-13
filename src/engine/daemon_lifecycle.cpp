@@ -32,6 +32,16 @@ namespace {
   node.label = value.value("label", node.id);
   node.source_file = value.value("source_file", std::string{});
   node.kind = value.value("type", value.value("kind", std::string{}));
+  // Round-trip the source span: without it a fast-loaded snapshot serves
+  // location-less, snippet-less context, and starves slice-cost knapsack packing.
+  if (const auto iter = value.find("source_location"); iter != value.end() && iter->is_object()) {
+    SourceLocation location;
+    location.start_line = iter->value("start_line", 0U);
+    location.start_column = iter->value("start_column", 0U);
+    location.end_line = iter->value("end_line", 0U);
+    location.end_column = iter->value("end_column", 0U);
+    node.source_location = location;
+  }
   if (const auto iter = value.find("confidence"); iter != value.end() && iter->is_string()) {
     Confidence confidence = Confidence::Extracted;
     if (parse_confidence(iter->get<std::string>(), confidence)) {

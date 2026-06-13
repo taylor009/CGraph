@@ -10,7 +10,9 @@ namespace {
 
 cgraph::GraphSnapshot sample_graph() {
   cgraph::GraphSnapshot graph;
-  graph.nodes.push_back(cgraph::Node{.id = "a", .label = "Alpha", .source_file = "a.cpp", .kind = "class"});
+  graph.nodes.push_back(cgraph::Node{.id = "a", .label = "Alpha", .source_file = "a.cpp", .kind = "class",
+                                     .source_location = cgraph::SourceLocation{
+                                         .start_line = 10, .start_column = 1, .end_line = 25, .end_column = 2}});
   graph.nodes.push_back(cgraph::Node{.id = "b", .label = "Beta", .source_file = "b.cpp", .kind = "function"});
   graph.edges.push_back(cgraph::Edge{.source = "a", .target = "b", .relation = "CALLS"});
   graph.build_state = cgraph::BuildState::DeterministicReady;
@@ -42,6 +44,20 @@ int main() {
   const auto snapshot = cgraph::read_graph_snapshot(reloaded);
   if (snapshot->nodes.size() != 2 || snapshot->edges.size() != 1 ||
       snapshot->build_state != cgraph::BuildState::DeterministicReady || snapshot->cache_hit_rate != 0.5) {
+    return 1;
+  }
+
+  // Regression: the source span must survive persist -> load. Without it a
+  // fast-loaded daemon serves location-less, snippet-less context and starves
+  // the slice-cost knapsack packer (research/2510.00446).
+  const cgraph::Node* alpha = nullptr;
+  for (const auto& node : snapshot->nodes) {
+    if (node.id == "a") {
+      alpha = &node;
+    }
+  }
+  if (alpha == nullptr || !alpha->source_location || alpha->source_location->start_line != 10 ||
+      alpha->source_location->end_line != 25 || alpha->source_location->end_column != 2) {
     return 1;
   }
 
