@@ -686,3 +686,19 @@ cgraph_set_warnings(cgraph_client_runtime_test)
 cgraph_enable_sanitizers(cgraph_client_runtime_test)
 
 add_test(NAME cgraph_client_runtime_test COMMAND cgraph_client_runtime_test)
+
+add_executable(cgraph_pack_context_parity_test
+  pack_context_parity_test.cpp)
+
+target_compile_definitions(cgraph_pack_context_parity_test
+  PRIVATE
+    CGRAPH_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+
+target_link_libraries(cgraph_pack_context_parity_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_pack_context_parity_test)
+cgraph_enable_sanitizers(cgraph_pack_context_parity_test)
+
+add_test(NAME cgraph_pack_context_parity_test COMMAND cgraph_pack_context_parity_test)

@@ -40,6 +40,12 @@ constexpr std::size_t kMaxSuggestions = 5;
 // gather candidates.
 constexpr std::size_t kDefaultContextBudget = 6000;  // tokens
 constexpr int kDefaultContextDepth = 2;
+// Knapsack packing gathers a wider ego graph (validated sweet spot; k=4 is past
+// the crossover). See research/2510.00446.
+constexpr int kKnapsackContextDepth = 3;
+// Hard ceiling on the knapsack DP capacity so a pathological `budget` param can
+// never blow up the O(n*capacity) table.
+constexpr std::size_t kMaxKnapsackCapacity = 50000;
 
 // Rough token estimate: ~4 characters per token. Good enough to pack a context
 // bundle under a budget without pulling in a real tokenizer.
@@ -153,6 +159,76 @@ struct Snippet {
     }
   }
   return brief;
+}
+
+// Lowercased alphanumeric terms, breaking camelCase and snake_case and keeping
+// terms of length >= 3. Mirrors the offline harness's relevance value
+// (research/select.py::_terms) so the knapsack scorer matches what step A validated.
+[[nodiscard]] std::unordered_set<std::string> lexical_terms(std::string_view text) {
+  std::unordered_set<std::string> terms;
+  std::string word;
+  const auto flush = [&]() {
+    if (word.empty()) {
+      return;
+    }
+    std::string sub;
+    const auto push_sub = [&]() {
+      if (sub.size() >= 3) {
+        terms.insert(sub);
+      }
+      sub.clear();
+    };
+    for (std::size_t i = 0; i < word.size(); ++i) {
+      const auto ch = static_cast<unsigned char>(word[i]);
+      const bool upper = std::isupper(ch) != 0;
+      const bool prev_upper = i > 0 && std::isupper(static_cast<unsigned char>(word[i - 1])) != 0;
+      const bool next_lower =
+          i + 1 < word.size() && std::islower(static_cast<unsigned char>(word[i + 1])) != 0;
+      if (i > 0 && upper && (!prev_upper || next_lower)) {
+        push_sub();
+      }
+      sub.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    push_sub();
+    word.clear();
+  };
+  for (const char c : text) {
+    if (std::isalnum(static_cast<unsigned char>(c)) != 0) {
+      word.push_back(c);
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return terms;
+}
+
+// Fraction of query terms also present in the node label (0..1).
+[[nodiscard]] double query_term_overlap(const std::unordered_set<std::string>& query_terms,
+                                        std::string_view label) {
+  if (query_terms.empty()) {
+    return 0.0;
+  }
+  const auto label_terms = lexical_terms(label);
+  std::size_t hit = 0;
+  for (const auto& term : query_terms) {
+    if (label_terms.contains(term)) {
+      ++hit;
+    }
+  }
+  return static_cast<double>(hit) / static_cast<double>(query_terms.size());
+}
+
+// Knapsack item weight: token cost of the node's (capped) source slice only --
+// NOT estimate_tokens(json_entry.dump()). Step A (research/2510.00446) showed the
+// JSON-entry overhead (mangled id + absolute path + location keys) flattens the
+// weight spread and degenerates the knapsack toward greedy; weighting by the slice
+// cost is the load-bearing fix that recovers the win.
+[[nodiscard]] std::size_t slice_token_cost(const Node& node) {
+  if (const auto snippet = read_source_snippet(node); !snippet.text.empty()) {
+    return std::max<std::size_t>(1, estimate_tokens(snippet.text));
+  }
+  return std::max<std::size_t>(1, estimate_tokens(node.label));
 }
 
 [[nodiscard]] std::unordered_map<std::string, const Node*> index_nodes(const GraphSnapshot& graph) {
@@ -487,7 +563,12 @@ struct Snippet {
 // included with its snippet, even if it alone exceeds the budget.
 [[nodiscard]] nlohmann::json pack_context(const GraphSnapshot& graph, const nlohmann::json& params) {
   const auto budget = params.value("budget", kDefaultContextBudget);
-  const auto max_depth = std::max(0, params.value("max_depth", kDefaultContextDepth));
+  // Packing strategy: "greedy" (default, historical behavior) or "knapsack" (the
+  // step-A-validated 0/1 knapsack fill). Knapsack gathers a wider ego graph by
+  // default. The flag is the rollback boundary: greedy is untouched.
+  const auto packing = params.value("packing", std::string{"greedy"});
+  const int default_depth = packing == "knapsack" ? kKnapsackContextDepth : kDefaultContextDepth;
+  const auto max_depth = std::max(0, params.value("max_depth", default_depth));
   const auto by_id = index_nodes(graph);
 
   // Resolve the focal node: exact id, then label, then the top-ranked match for
@@ -568,6 +649,94 @@ struct Snippet {
 
   // The focal node always leads, with its snippet.
   auto focus = with_source(node_brief(*focal), *focal);
+
+  // Knapsack packing path (flag-gated; greedy below is the default and unchanged).
+  // 0/1 knapsack over candidates: weight = source-slice token cost (the load-bearing
+  // step-A fix), value = relevance (nearer hops + query-term overlap). The focal is
+  // always included; the knapsack fills the remaining budget. No brief-degradation
+  // here -- selection is whole-or-nothing, matching the validated harness.
+  if (packing == "knapsack") {
+    const auto query_terms = lexical_terms(needle);
+    std::vector<std::size_t> weight(candidates.size());
+    std::vector<double> value(candidates.size());
+    std::size_t total_weight = 0;
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+      const auto* node = candidates[i];
+      weight[i] = slice_token_cost(*node);
+      const auto depth = reached[node->id].depth;
+      value[i] = 1.0 / (1.0 + static_cast<double>(depth)) + query_term_overlap(query_terms, node->label);
+      total_weight += weight[i];
+    }
+
+    const std::size_t focal_cost = slice_token_cost(*focal);
+    const std::size_t raw_capacity = budget > focal_cost ? budget - focal_cost : 0;
+    // DP-capacity guard: never allocate beyond what the candidates can fill, and
+    // clamp pathological budgets so the O(n*capacity) table stays bounded.
+    const std::size_t capacity = std::min({raw_capacity, total_weight, kMaxKnapsackCapacity});
+
+    std::vector<const Node*> chosen;
+    std::size_t used = focal_cost;
+    if (capacity > 0 && !candidates.empty()) {
+      const std::size_t n = candidates.size();
+      // dp[i][c] = max total value using the first i candidates within weight c.
+      std::vector<std::vector<double>> dp(n + 1, std::vector<double>(capacity + 1, 0.0));
+      for (std::size_t i = 1; i <= n; ++i) {
+        const auto w = weight[i - 1];
+        const auto v = value[i - 1];
+        for (std::size_t c = 0; c <= capacity; ++c) {
+          dp[i][c] = dp[i - 1][c];
+          if (w <= c) {
+            const double take = dp[i - 1][c - w] + v;
+            if (take > dp[i][c]) {
+              dp[i][c] = take;
+            }
+          }
+        }
+      }
+      // Backtrack to recover the chosen items (size_t-safe reverse iteration).
+      std::size_t c = capacity;
+      for (std::size_t i = n; i-- > 0;) {
+        if (dp[i + 1][c] != dp[i][c]) {
+          chosen.push_back(candidates[i]);
+          used += weight[i];
+          c -= weight[i];
+        }
+      }
+    }
+
+    // Emit nearest-first for a stable, readable bundle (selection is the DP above).
+    std::ranges::sort(chosen, [&](const Node* lhs, const Node* rhs) {
+      const auto ld = reached[lhs->id].depth;
+      const auto rd = reached[rhs->id].depth;
+      if (ld != rd) {
+        return ld < rd;
+      }
+      return lhs->label < rhs->label;
+    });
+
+    auto included = nlohmann::json::array();
+    for (const auto* node : chosen) {
+      auto full = with_source(node_brief(*node), *node);
+      full["depth"] = reached[node->id].depth;
+      if (const auto& via = reached[node->id].via; !via.empty()) {
+        full["via"] = via;
+      }
+      included.push_back(std::move(full));
+    }
+    const std::size_t omitted = candidates.size() - chosen.size();
+    nlohmann::json result{
+        {"focus", std::move(focus)},
+        {"budget", budget},
+        {"tokens_used", used},
+        {"packing", "knapsack"},
+        {"included", std::move(included)},
+        {"omitted", omitted}};
+    if (omitted > 0) {
+      result["truncated"] = true;
+    }
+    return result;
+  }
+
   std::size_t used = estimate_tokens(focus.dump());
 
   auto included = nlohmann::json::array();
