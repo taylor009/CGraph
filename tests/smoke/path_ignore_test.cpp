@@ -19,6 +19,12 @@ int test_skipped_directory() {
       !cgraph::is_skipped_directory("build") || !cgraph::is_skipped_directory("cgraph-out")) {
     return 1;
   }
+  // Generated/scratch dirs that escape a root-anchored .gitignore (nested .next in
+  // a worktree, agent worktree checkouts under .agents/) must skip unconditionally.
+  if (!cgraph::is_skipped_directory(".next") || !cgraph::is_skipped_directory(".agents") ||
+      !cgraph::is_skipped_directory("coverage")) {
+    return 1;
+  }
   // A normal source directory must not be skipped.
   if (cgraph::is_skipped_directory("src") || cgraph::is_skipped_directory("docs")) {
     return 1;
