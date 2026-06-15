@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -65,6 +66,32 @@ enum class DaemonOp { Query, Path, Explain, Impact, Context, Update, Status, Shu
 
 inline constexpr std::size_t kDaemonOpCount = static_cast<std::size_t>(DaemonOp::Count);
 
+// --- Durable ledger schema (persist-op-stats-ledger) -------------------------
+// The wall clock is read ONLY at the flush boundary to stamp a ledger line; the
+// live substrate above stays monotonic. Changing the bucket layout is a
+// versioned, migration-gated decision: bump kLedgerSchemaVersion and the rollup
+// will refuse to merge histograms across versions.
+using WallClock = std::chrono::system_clock;
+
+inline constexpr int kLedgerSchemaVersion = 1;
+
+// Pinned, log2-spaced latency bucket upper bounds (ms). A latency lands in the
+// first bucket whose bound it is strictly below; latencies >= the top bound fall
+// in the overflow bucket. 11 bounded buckets + 1 overflow = 12 counts per op.
+inline constexpr std::array<double, 11> kHistBucketUpperMs = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024};
+inline constexpr std::size_t kHistBucketCount = kHistBucketUpperMs.size() + 1;
+
+// Bucket index in [0, kHistBucketCount): 0.4 ms -> 0, 1 ms -> 1, 1.5 ms -> 1,
+// 4000 ms -> overflow (11). Inline so DaemonOpStats::record stays self-contained.
+[[nodiscard]] inline std::size_t latency_bucket(double ms) {
+  for (std::size_t i = 0; i < kHistBucketUpperMs.size(); ++i) {
+    if (ms < kHistBucketUpperMs[i]) {
+      return i;
+    }
+  }
+  return kHistBucketUpperMs.size();  // overflow
+}
+
 [[nodiscard]] const char* daemon_op_name(DaemonOp op);
 [[nodiscard]] std::optional<DaemonOp> daemon_op_from_string(std::string_view name);
 
@@ -103,6 +130,10 @@ class RollingWindow {
 struct DaemonOpStats {
   std::array<std::size_t, kDaemonOpCount> count{};
   std::array<double, kDaemonOpCount> total_ms{};
+  // Full-lifetime per-op latency histogram (the recent ring only holds the last
+  // N mixed-op samples, so it cannot answer a per-op lifetime percentile). Binned
+  // on the pinned layout; the ledger reads these directly at flush.
+  std::array<std::array<std::size_t, kHistBucketCount>, kDaemonOpCount> latency_hist{};
   std::size_t query_zero_hits = 0;
   RollingWindow recent;
 
@@ -110,10 +141,22 @@ struct DaemonOpStats {
     const auto idx = static_cast<std::size_t>(op);
     count[idx] += 1;
     total_ms[idx] += latency_ms;
+    latency_hist[idx][latency_bucket(latency_ms)] += 1;
     if (op == DaemonOp::Query && zero_hit) {
       query_zero_hits += 1;
     }
     recent.record(RecentOp{op, latency_ms, zero_hit});
+  }
+
+  // True when >=1 substantive op (query/path/explain/impact/context) was served.
+  // Gates the durable flush so idle status-only daemon spawns write no ledger line.
+  [[nodiscard]] bool has_substantive_ops() const {
+    return count[static_cast<std::size_t>(DaemonOp::Query)] +
+               count[static_cast<std::size_t>(DaemonOp::Path)] +
+               count[static_cast<std::size_t>(DaemonOp::Explain)] +
+               count[static_cast<std::size_t>(DaemonOp::Impact)] +
+               count[static_cast<std::size_t>(DaemonOp::Context)] >
+           0;
   }
 };
 
@@ -146,5 +189,36 @@ struct DaemonOpStats {
 // Daemon op-stats body for the status payload: lifetime totals, recent window
 // (count + p50/mean latency), and the query zero-hit rate.
 [[nodiscard]] nlohmann::json op_stats_json(const DaemonOpStats& stats);
+
+// --- Durable ledger: line builder, rollup, and append (persist-op-stats-ledger) ---
+
+// ISO-8601 UTC ("2026-06-15T11:20:12Z") <-> wall-clock time point. parse returns
+// nullopt on a malformed string. Used only at the ledger boundary.
+[[nodiscard]] std::string format_iso8601_utc(WallClock::time_point tp);
+[[nodiscard]] std::optional<WallClock::time_point> parse_iso8601_utc(std::string_view text);
+
+// One JSONL ledger line for a daemon lifetime: schema version, wall-clock boot/
+// shutdown, uptime, query zero-hits, and per substantive op {count, total_ms,
+// hist_ms[kHistBucketCount]}. Pure: timestamps are inputs, no clock is read here.
+[[nodiscard]] nlohmann::json op_stats_ledger_line(const DaemonOpStats& stats,
+                                                  WallClock::time_point boot,
+                                                  WallClock::time_point shutdown);
+
+// Approximate percentile (ms) read off a merged per-op histogram by in-bucket
+// linear interpolation. The overflow bucket reports its lower bound (the top
+// bounded edge) as a floor. 0 for an empty histogram.
+[[nodiscard]] double histogram_percentile(const std::array<std::size_t, kHistBucketCount>& hist, double p);
+
+// Roll up ledger lines whose `shutdown` is at/after `since`: summed per-op counts
+// and total_ms (exact), weighted-mean and merged-histogram p50/p90 latency
+// (approximate), and the overall query zero-hit rate. Lines whose schema_version
+// differs from the current version are counted but their histograms are not
+// merged; the result flags `mixed_schema_versions` when that happens. Pure.
+[[nodiscard]] nlohmann::json aggregate_op_stats_ledger(const std::vector<nlohmann::json>& lines,
+                                                       WallClock::time_point since);
+
+// Best-effort append of one ledger line to `path` (creates parent dirs, opens in
+// append mode, writes line + newline). Returns false on any failure; never throws.
+[[nodiscard]] bool append_op_stats_ledger(const std::filesystem::path& path, const nlohmann::json& line);
 
 }  // namespace cgraph

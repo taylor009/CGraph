@@ -6,6 +6,7 @@
 #include "cgraph/daemon_ops.hpp"
 #include "cgraph/incremental_update.hpp"
 #include "cgraph/index_persistence.hpp"
+#include "cgraph/operation_stats.hpp"
 #include "cgraph/protocol.hpp"
 #include "cgraph/semantic_cache.hpp"
 #include "cgraph/semantic_chunk_plan.hpp"
@@ -570,6 +571,20 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     const std::scoped_lock lock(graph_mutex);
     persist_graph_and_manifest();
     std::cerr << "graphd: persisted incremental graph state on exit\n";
+  }
+  // Best-effort durable op-stats flush: append this lifetime's op-stats to a JSONL
+  // ledger so query activity survives idle-shutdown and aggregates across restarts.
+  // Gated on >=1 substantive op so idle status-only spawns write nothing. The wall
+  // clock is read once here; boot is derived from the monotonic uptime, so the live
+  // daemon stayed purely monotonic. Never blocks, throws, or fails the shutdown.
+  if (state.op_stats.has_substantive_ops()) {
+    const auto shutdown_wall = WallClock::now();
+    const auto boot_wall = shutdown_wall - std::chrono::duration_cast<WallClock::duration>(
+                                               StatsClock::now() - state.start_time);
+    if (!append_op_stats_ledger(out_dir / "op-stats-ledger.jsonl",
+                                op_stats_ledger_line(state.op_stats, boot_wall, shutdown_wall))) {
+      std::cerr << "graphd: op-stats ledger flush failed (non-fatal)\n";
+    }
   }
   {
     const std::scoped_lock lock(refresh_mutex);

@@ -3,8 +3,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace cgraph {
 namespace {
@@ -153,6 +158,185 @@ nlohmann::json op_stats_json(const DaemonOpStats& stats) {
       {"query_zero_hits", stats.query_zero_hits},
       {"query_zero_hit_rate", query_zero_hit_rate(query_count, stats.query_zero_hits)},
   };
+}
+
+// --- Durable ledger (persist-op-stats-ledger) --------------------------------
+
+namespace {
+
+// The substantive ops the ledger records and the rollup headlines.
+constexpr std::array<DaemonOp, 5> kSubstantiveOps = {
+    DaemonOp::Query, DaemonOp::Path, DaemonOp::Explain, DaemonOp::Impact, DaemonOp::Context};
+
+}  // namespace
+
+std::string format_iso8601_utc(WallClock::time_point tp) {
+  const std::time_t t = WallClock::to_time_t(tp);
+  std::tm tm{};
+  ::gmtime_r(&t, &tm);
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+  return buf;
+}
+
+std::optional<WallClock::time_point> parse_iso8601_utc(std::string_view text) {
+  int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+  // Tolerant of a trailing fractional second / offset variations is out of scope;
+  // we emit and read the canonical "Z" form only.
+  if (std::sscanf(std::string(text).c_str(), "%d-%d-%dT%d:%d:%dZ", &y, &mo, &d, &h, &mi, &s) != 6) {
+    return std::nullopt;
+  }
+  std::tm tm{};
+  tm.tm_year = y - 1900;
+  tm.tm_mon = mo - 1;
+  tm.tm_mday = d;
+  tm.tm_hour = h;
+  tm.tm_min = mi;
+  tm.tm_sec = s;
+  const std::time_t t = ::timegm(&tm);
+  if (t == static_cast<std::time_t>(-1)) {
+    return std::nullopt;
+  }
+  return WallClock::from_time_t(t);
+}
+
+nlohmann::json op_stats_ledger_line(const DaemonOpStats& stats,
+                                    WallClock::time_point boot,
+                                    WallClock::time_point shutdown) {
+  nlohmann::json ops = nlohmann::json::object();
+  for (const auto op : kSubstantiveOps) {
+    const auto idx = static_cast<std::size_t>(op);
+    nlohmann::json hist = nlohmann::json::array();
+    for (std::size_t b = 0; b < kHistBucketCount; ++b) {
+      hist.push_back(stats.latency_hist[idx][b]);
+    }
+    ops[daemon_op_name(op)] = {
+        {"count", stats.count[idx]},
+        {"total_ms", stats.total_ms[idx]},
+        {"hist_ms", std::move(hist)},
+    };
+  }
+  return {
+      {"schema_version", kLedgerSchemaVersion},
+      {"boot", format_iso8601_utc(boot)},
+      {"shutdown", format_iso8601_utc(shutdown)},
+      {"uptime_seconds", std::chrono::duration<double>(shutdown - boot).count()},
+      {"query_zero_hits", stats.query_zero_hits},
+      {"ops", std::move(ops)},
+  };
+}
+
+double histogram_percentile(const std::array<std::size_t, kHistBucketCount>& hist, double p) {
+  std::size_t total = 0;
+  for (const auto c : hist) {
+    total += c;
+  }
+  if (total == 0) {
+    return 0.0;
+  }
+  const double target = std::clamp(p, 0.0, 1.0) * static_cast<double>(total);
+  std::size_t cum = 0;
+  for (std::size_t b = 0; b < kHistBucketCount; ++b) {
+    const std::size_t c = hist[b];
+    if (c == 0) {
+      continue;
+    }
+    if (static_cast<double>(cum + c) >= target) {
+      // Overflow bucket is unbounded above; report its lower edge as a floor.
+      if (b >= kHistBucketUpperMs.size()) {
+        return kHistBucketUpperMs.back();
+      }
+      const double lower = (b == 0) ? 0.0 : kHistBucketUpperMs[b - 1];
+      const double upper = kHistBucketUpperMs[b];
+      const double into = target - static_cast<double>(cum);  // [0, c]
+      const double frac = std::clamp(into / static_cast<double>(c), 0.0, 1.0);
+      return lower + (upper - lower) * frac;
+    }
+    cum += c;
+  }
+  return kHistBucketUpperMs.back();
+}
+
+nlohmann::json aggregate_op_stats_ledger(const std::vector<nlohmann::json>& lines,
+                                         WallClock::time_point since) {
+  std::array<std::size_t, kDaemonOpCount> sum_count{};
+  std::array<double, kDaemonOpCount> sum_total_ms{};
+  std::array<std::array<std::size_t, kHistBucketCount>, kDaemonOpCount> merged_hist{};
+  std::size_t lifetimes = 0;
+  std::size_t query_zero_hits = 0;
+  bool mixed = false;
+
+  for (const auto& line : lines) {
+    if (!line.is_object()) {
+      continue;  // tolerate a malformed/skipped line
+    }
+    const auto shutdown = parse_iso8601_utc(line.value("shutdown", std::string{}));
+    if (!shutdown || *shutdown < since) {
+      continue;  // out of window (boundary inclusive at `since`)
+    }
+    ++lifetimes;
+    const bool mergeable = line.value("schema_version", 0) == kLedgerSchemaVersion;
+    if (!mergeable) {
+      mixed = true;
+    }
+    query_zero_hits += line.value("query_zero_hits", static_cast<std::size_t>(0));
+    const auto ops = line.value("ops", nlohmann::json::object());
+    for (const auto op : kSubstantiveOps) {
+      const auto* name = daemon_op_name(op);
+      if (!ops.contains(name)) {
+        continue;
+      }
+      const auto& entry = ops[name];
+      const auto idx = static_cast<std::size_t>(op);
+      sum_count[idx] += entry.value("count", static_cast<std::size_t>(0));
+      sum_total_ms[idx] += entry.value("total_ms", 0.0);
+      if (mergeable && entry.contains("hist_ms") && entry["hist_ms"].is_array()) {
+        const auto& hist = entry["hist_ms"];
+        for (std::size_t b = 0; b < kHistBucketCount && b < hist.size(); ++b) {
+          merged_hist[idx][b] += hist[b].get<std::size_t>();
+        }
+      }
+    }
+  }
+
+  nlohmann::json ops_out = nlohmann::json::object();
+  for (const auto op : kSubstantiveOps) {
+    const auto idx = static_cast<std::size_t>(op);
+    ops_out[daemon_op_name(op)] = {
+        {"count", sum_count[idx]},
+        {"mean_ms", mean_ms(sum_total_ms[idx], sum_count[idx])},
+        {"p50_ms_approx", histogram_percentile(merged_hist[idx], 0.5)},
+        {"p90_ms_approx", histogram_percentile(merged_hist[idx], 0.9)},
+    };
+  }
+  const std::size_t query_count = sum_count[static_cast<std::size_t>(DaemonOp::Query)];
+  return {
+      {"since", format_iso8601_utc(since)},
+      {"lifetimes", lifetimes},
+      {"mixed_schema_versions", mixed},
+      {"query",
+       {{"count", query_count},
+        {"zero_hits", query_zero_hits},
+        {"zero_hit_rate", query_zero_hit_rate(query_count, query_zero_hits)}}},
+      {"ops", std::move(ops_out)},
+  };
+}
+
+bool append_op_stats_ledger(const std::filesystem::path& path, const nlohmann::json& line) {
+  try {
+    if (path.has_parent_path()) {
+      std::error_code ec;
+      std::filesystem::create_directories(path.parent_path(), ec);
+    }
+    std::ofstream out(path, std::ios::app);
+    if (!out) {
+      return false;
+    }
+    out << line.dump() << '\n';
+    return static_cast<bool>(out);
+  } catch (...) {
+    return false;  // best-effort: never propagate
+  }
 }
 
 }  // namespace cgraph
