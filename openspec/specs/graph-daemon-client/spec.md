@@ -135,17 +135,29 @@ The adaptive gather mode SHALL remain non-default until its grade-2 recall impro
 reproduced through the engine's own token accounting (capped source-slice char/4 cost and the
 response's real packing), not only the offline Python harness. A parity test SHALL drive the
 `context` op with `gather = "adaptive"` over the evaluation rows and assert the in-engine recall and
-candidate-cost deltas against recorded targets; when the evaluation artifacts are absent the test
-SHALL skip rather than fail.
+candidate-cost deltas against recorded targets. The parity test SHALL measure against a committed,
+version-controlled fixture pair (a deterministic code-only graph and a verbatim eval snapshot), NOT
+the mutable working-tree artifacts (`cgraph-out/graph.json`, `research/eval/queries.jsonl`), so the
+gate is reproducible and immune to daemon-state or working-tree drift. Because the fixture is always
+present, the gate SHALL run on every checkout including CI; the artifact-absent skip SHALL remain
+only as a defensive fallback for the case where the fixture is missing. The recorded targets and
+tolerance SHALL be unchanged by this stabilization.
 
 #### Scenario: Parity gate reproduces the recall gain in-engine
-- **WHEN** the parity test runs `gather = "adaptive"` against the evaluation rows with artifacts present
+- **WHEN** the parity test runs `gather = "adaptive"` against the committed fixture rows
 - **THEN** mean grade-2 recall@budget is at least the fixed-2-hop baseline plus the change's target
   margin, measured under the engine's real cost model, and the test fails if it is not
 
-#### Scenario: Parity gate is CI-safe when artifacts are absent
-- **WHEN** the evaluation graph/queries artifacts are not present (clean checkout / CI)
-- **THEN** the parity test skips with a success exit rather than failing
+#### Scenario: Parity gate runs against the committed fixture, not the working tree
+- **WHEN** the parity test runs on any checkout, regardless of the contents of
+  `cgraph-out/graph.json` or whether a daemon has accumulated unrelated nodes
+- **THEN** it reads the committed fixture pair, reaches the measurement (does not skip), and its
+  result depends only on the fixture and the engine, not on working-tree state
+
+#### Scenario: Skip is a fallback only when the fixture is missing
+- **WHEN** the committed fixture pair is absent (e.g. a deliberately stripped tree)
+- **THEN** the test skips with a success exit rather than failing, exactly as the prior
+  artifact-absent behavior
 
 ### Requirement: Context responses self-describe their gather and packing mode
 Every `context` op response SHALL include a `gather` field (`"fixed"` or `"adaptive"`) and a
@@ -227,4 +239,77 @@ requirement that a `query`/`q` be supplied for the gate to take effect. The `gat
 - **WHEN** an MCP client calls `graph_context` with `gather = "adaptive"` and a `gather_theta`
 - **THEN** the daemon request targets the `context` op with `gather` and `gather_theta` carried
   through unchanged
+
+### Requirement: Explain supports optional relation filtering
+The `explain` op SHALL accept an optional `relation` parameter. When `relation` is a
+non-empty string, the op SHALL return only adjacent edges whose stored relation token
+equals it, using the same exact, case-sensitive comparison as `impact`'s relation filter;
+no case-folding or alias mapping SHALL be applied. The relation filter SHALL be applied
+before centrality ordering and before the `limit` truncation, so that edges matching the
+requested relation are never displaced by higher-centrality edges of other relations. The
+relation filter SHALL compose with the existing `direction` filter: when both are given,
+only edges satisfying both SHALL be returned. When `relation` is absent or empty, the op's
+returned neighbor set, ordering, and counts SHALL be byte-for-byte identical to current
+behavior. A `relation` value that matches no adjacent edge SHALL yield an empty neighbor
+list and SHALL NOT be treated as an error or a missing-node case.
+
+#### Scenario: Relation filter returns only matching edges
+- **WHEN** `explain` is called on a node with mixed adjacent relations and `relation: CALLS`
+- **THEN** every returned neighbor carries `relation == "CALLS"`, and an adjacent non-`CALLS`
+  neighbor that appears in the unfiltered result is absent
+
+#### Scenario: Absent relation preserves current behavior
+- **WHEN** `explain` is called without a `relation` parameter
+- **THEN** the returned neighbor set, centrality ordering, and counts are identical to the
+  behavior before this change
+
+#### Scenario: Relation and direction compose
+- **WHEN** `explain` is called with `direction: in` and `relation: CALLS`
+- **THEN** only incoming `CALLS` edges are returned (the intersection of both filters)
+
+#### Scenario: No-match relation yields an empty neighbor list
+- **WHEN** `explain` is called with a `relation` that no adjacent edge carries
+- **THEN** the response is a found node with an empty neighbor list, not an error or a
+  not-found result
+
+### Requirement: graph_explain advertises typed traversal and forwards the relation parameter
+The `graph_explain` MCP tool description SHALL document the `relation` parameter and the
+named single-hop traversal patterns an agent uses, mapped to the project's stored relation
+tokens: find callers (`direction: in`, `relation: CALLS`), find callees (`direction: out`,
+`relation: CALLS`), find references (`relation: references`), trace imports
+(`relation: imports`), and inspect inheritance/implementation edges (`relation: inherits`).
+The tool SHALL forward the `relation` argument verbatim to the `explain` op so the param is
+never silently dropped.
+
+#### Scenario: Tool description names the typed patterns
+- **WHEN** an MCP client lists tools
+- **THEN** the `graph_explain` description names the `relation` parameter and the
+  callers/callees/references usage patterns
+
+#### Scenario: relation forwards to the explain op
+- **WHEN** an MCP client calls `graph_explain` with `relation: CALLS`
+- **THEN** the daemon receives `op == "explain"` with `params.relation == "CALLS"`
+
+### Requirement: Parity gate uses a committed deterministic fixture graph
+The pack_context parity gate's graph fixture SHALL be a deterministic, code-only build of the
+project (excluding disposable research and generated build artifacts), committed under version
+control alongside a verbatim snapshot of the evaluation set. The fixture graph SHALL be reproducible:
+rebuilding it from the same sources SHALL produce a byte-identical `graph.json`. The fixture graph
+and the fixture eval set SHALL be internally consistent — every grade-2 evaluation `node_id` SHALL
+resolve to a node in the fixture graph — so the gate is independent of checkout path and machine. The
+fixture eval set SHALL be a verbatim copy: labels, grades, queries, and recorded targets SHALL NOT be
+altered when producing or regenerating the fixture.
+
+#### Scenario: Fixture graph is deterministic
+- **WHEN** the fixture graph is rebuilt from the same sources
+- **THEN** the resulting `graph.json` is byte-identical to the committed fixture
+
+#### Scenario: Fixture graph and eval set are internally consistent
+- **WHEN** the parity test resolves each grade-2 evaluation `node_id` against the fixture graph
+- **THEN** every id resolves to a node present in the fixture graph
+
+#### Scenario: Fixture excludes disposable and generated content
+- **WHEN** the fixture graph is generated
+- **THEN** it contains only the project's code (e.g. src/tests/scripts) and no `research/` or
+  `build/` nodes, matching the graph the recorded targets were calibrated on
 

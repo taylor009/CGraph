@@ -829,6 +829,10 @@ struct Snippet {
   // "in" keeps only edges into the node (callers/importers), "out" only edges
   // it points at (callees/imports); default is both.
   const auto direction = params.value("direction", std::string{"both"});
+  // Optional typed traversal: when set, keep only edges of this relation, using
+  // the same exact match as impact_radius (no case-folding) so the two ops share
+  // one filter dialect. find-callers = direction:in + relation:CALLS, etc.
+  const auto relation = params.value("relation", std::string{});
   const auto limit = params.value("limit", kDefaultExplainNeighborLimit);
 
   const auto by_id = index_nodes(graph);
@@ -850,6 +854,9 @@ struct Snippet {
       continue;
     }
     if ((direction == "out" && !outgoing) || (direction == "in" && !incoming)) {
+      continue;
+    }
+    if (!relation.empty() && edge.relation != relation) {
       continue;
     }
     nlohmann::json entry{

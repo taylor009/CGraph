@@ -494,5 +494,82 @@ int main() {
     }
   }
 
+  // --- typed explain: a relation filter narrows neighbors to one edge type and
+  //     composes with direction; an absent relation returns the full set ---
+  {
+    cgraph::DaemonState s;
+    cgraph::GraphSnapshot g;
+    g.build_state = cgraph::BuildState::DeterministicReady;
+    // Hub "h" is reached by four distinct relation types so a relation filter has
+    // something to exclude: an incoming and an outgoing CALLS, an incoming
+    // reference, and an incoming import.
+    g.nodes.push_back(cgraph::Node{.id = "h", .label = "Hub", .kind = "class"});
+    g.nodes.push_back(cgraph::Node{.id = "caller", .label = "Caller", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{.id = "callee", .label = "Callee", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{.id = "refer", .label = "Referer", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{.id = "mod", .label = "Importer", .kind = "module"});
+    g.edges.push_back(cgraph::Edge{.source = "caller", .target = "h", .relation = "CALLS"});
+    g.edges.push_back(cgraph::Edge{.source = "h", .target = "callee", .relation = "CALLS"});
+    g.edges.push_back(cgraph::Edge{.source = "refer", .target = "h", .relation = "references"});
+    g.edges.push_back(cgraph::Edge{.source = "mod", .target = "h", .relation = "imports"});
+    cgraph::publish_graph_snapshot(s, std::move(g));
+
+    const auto rel_count = [](const nlohmann::json& result, const std::string& want) {
+      std::size_t n = 0;
+      for (const auto& neighbor : result["neighbors"]) {
+        if (neighbor.value("relation", std::string{}) == want) {
+          ++n;
+        }
+      }
+      return n;
+    };
+
+    // No relation -> every adjacent edge (the parity case): four mixed-relation
+    // neighbors, including the lone reference edge.
+    const auto all = cgraph::handle_daemon_request(s, cgraph::make_request("explain", {{"id", "h"}}));
+    if (all["result"].value("neighbor_count", 0U) != 4U || rel_count(all["result"], "references") != 1) {
+      return 80;
+    }
+
+    // relation=CALLS -> only the two CALLS edges; the reference and import drop,
+    // and no off-relation edge leaks through.
+    const auto calls = cgraph::handle_daemon_request(
+        s, cgraph::make_request("explain", {{"id", "h"}, {"relation", "CALLS"}}));
+    const auto& calls_result = calls["result"];
+    if (calls_result["neighbors"].size() != 2 || calls_result.value("neighbor_count", 0U) != 2U) {
+      return 81;
+    }
+    if (rel_count(calls_result, "CALLS") != 2 || rel_count(calls_result, "references") != 0 ||
+        rel_count(calls_result, "imports") != 0) {
+      return 82;
+    }
+
+    // relation + direction compose: incoming CALLS only -> just the caller.
+    const auto in_calls = cgraph::handle_daemon_request(
+        s, cgraph::make_request("explain", {{"id", "h"}, {"direction", "in"}, {"relation", "CALLS"}}));
+    if (in_calls["result"]["neighbors"].size() != 1 ||
+        in_calls["result"]["neighbors"][0].value("source", std::string{}) != "caller" ||
+        in_calls["result"]["neighbors"][0].value("direction", std::string{}) != "in") {
+      return 83;
+    }
+
+    // A single non-CALLS relation isolates that edge type.
+    const auto refs = cgraph::handle_daemon_request(
+        s, cgraph::make_request("explain", {{"id", "h"}, {"relation", "references"}}));
+    if (refs["result"]["neighbors"].size() != 1 ||
+        refs["result"]["neighbors"][0].value("relation", std::string{}) != "references") {
+      return 84;
+    }
+
+    // A relation no adjacent edge carries -> a found node with an empty neighbor
+    // list, not an error or a not-found result.
+    const auto nomatch = cgraph::handle_daemon_request(
+        s, cgraph::make_request("explain", {{"id", "h"}, {"relation", "inherits"}}));
+    if (nomatch["result"].value("found", true) == false || !nomatch["result"]["neighbors"].empty() ||
+        nomatch["result"].value("neighbor_count", 1U) != 0U) {
+      return 85;
+    }
+  }
+
   return 0;
 }

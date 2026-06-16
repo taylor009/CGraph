@@ -692,7 +692,8 @@ add_executable(cgraph_pack_context_parity_test
 
 target_compile_definitions(cgraph_pack_context_parity_test
   PRIVATE
-    CGRAPH_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+    CGRAPH_REPO_ROOT="${CMAKE_SOURCE_DIR}"
+    CGRAPH_PARITY_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/pack_context_parity")
 
 target_link_libraries(cgraph_pack_context_parity_test
   PRIVATE

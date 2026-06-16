@@ -38,6 +38,23 @@ int main() {
     return 1;
   }
 
+  // graph_explain advertises the relation filter and the named typed-traversal
+  // patterns (callers/callees/references) so an agent can ask one structural
+  // question instead of post-filtering a mixed neighbor dump.
+  bool explain_doc_mentions_typed = false;
+  for (const auto& tool : listed["result"]["tools"]) {
+    if (tool.value("name", std::string{}) == "graph_explain") {
+      const auto desc = tool.value("description", std::string{});
+      const bool has_relation_param = tool["inputSchema"]["properties"].contains("relation");
+      explain_doc_mentions_typed = has_relation_param && desc.find("caller") != std::string::npos &&
+                                   desc.find("callee") != std::string::npos &&
+                                   desc.find("reference") != std::string::npos;
+    }
+  }
+  if (!explain_doc_mentions_typed) {
+    return 1;
+  }
+
   // Arguments forward verbatim so optional params (kind, file, limit) reach the
   // daemon instead of being silently dropped.
   const auto called = cgraph::handle_mcp_request(
@@ -63,6 +80,21 @@ int main() {
       forwarder);
   if (explained.contains("error") || forwarded["op"] != "explain" || forwarded["params"]["id"] != "a" ||
       forwarded["params"]["direction"] != "in" || forwarded["params"]["limit"] != 3) {
+    return 1;
+  }
+
+  // graph_explain forwards the relation filter verbatim to the explain op, so an
+  // agent can ask "who calls this" (relation=CALLS) and reach typed traversal.
+  const auto explain_typed = cgraph::handle_mcp_request(
+      nlohmann::json{
+          {"jsonrpc", "2.0"},
+          {"id", 7},
+          {"method", "tools/call"},
+          {"params",
+           {{"name", "graph_explain"}, {"arguments", {{"id", "a"}, {"direction", "in"}, {"relation", "CALLS"}}}}}},
+      forwarder);
+  if (explain_typed.contains("error") || forwarded["op"] != "explain" ||
+      forwarded["params"]["relation"] != "CALLS") {
     return 1;
   }
 

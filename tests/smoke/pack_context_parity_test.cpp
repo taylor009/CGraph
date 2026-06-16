@@ -1,7 +1,7 @@
 // Parity gate for the knapsack packing path in pack_context.
 //
-// Reproduces the offline harness (research/2510.00446) against the SAME graph
-// (cgraph-out/graph.json) and eval set (research/eval/queries.jsonl): inject each
+// Reproduces the offline harness (research/2510.00446) against a COMMITTED fixture
+// pair (tests/fixtures/pack_context_parity/{graph.json,queries.jsonl}): inject each
 // row's grade-2 focal seed, run the C++ `context` op with packing=knapsack at k=3,
 // and compare mean packed grade-2 recall to the harness numbers.
 //
@@ -10,9 +10,11 @@
 // MODEL-4 harness recall (0.591 / 0.625 / 0.666 at 2k/4k/8k), NOT the tiktoken
 // reference (0.541 / 0.569 / 0.614). Model 4 is the cost model the engine runs.
 //
-// The graph/eval artifacts are gitignored, so when absent (CI / clean checkout) the
-// test SKIPS (exit 0). It is the real gate when run locally where artifacts exist;
-// knapsack stays non-default until this passes.
+// The fixture is a deterministic, code-only graph (no research/ or build/ nodes)
+// committed alongside a verbatim eval snapshot, so the gate is reproducible and
+// immune to working-tree / daemon drift, and runs on every checkout including CI.
+// It does NOT read the mutable cgraph-out/graph.json. The absent-artifact skip
+// remains only as a defensive fallback if the fixture is somehow missing.
 
 #include "cgraph/daemon_lifecycle.hpp"
 #include "cgraph/daemon_ops.hpp"
@@ -48,14 +50,16 @@ double centrality_of(const cgraph::Node& node) {
 }  // namespace
 
 int main() {
-  const fs::path root = CGRAPH_REPO_ROOT;
-  const fs::path graph_path = root / "cgraph-out" / "graph.json";
-  const fs::path eval_path = root / "research" / "eval" / "queries.jsonl";
+  // Committed fixture pair (deterministic code-only graph + verbatim eval snapshot),
+  // NOT the mutable cgraph-out/graph.json -- so the gate is drift-immune and runs in CI.
+  const fs::path fixture = CGRAPH_PARITY_FIXTURE_DIR;
+  const fs::path graph_path = fixture / "graph.json";
+  const fs::path eval_path = fixture / "queries.jsonl";
 
   if (!fs::exists(graph_path) || !fs::exists(eval_path)) {
-    std::cout << "SKIP: parity artifacts absent (" << graph_path << " / " << eval_path
-              << "). Run a one-shot build + scripts/bootstrap_eval.py to enable.\n";
-    return 0;  // CI-safe; gate runs locally where artifacts exist.
+    std::cout << "SKIP: parity fixture absent (" << graph_path << " / " << eval_path
+              << "). Regenerate per openspec stabilize-parity-gate-fixture.\n";
+    return 0;  // Defensive fallback; the fixture is committed, so this should not trigger.
   }
 
   cgraph::DaemonState state;

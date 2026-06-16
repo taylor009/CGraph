@@ -56,12 +56,17 @@ namespace {
            {"target", string_param("node id or exact symbol name to reach")}}),
       tool_schema(
           "graph_explain",
-          "One symbol in depth: its source snippet plus every caller, callee, import, and container "
-          "edge (most important neighbors first). Accepts a node id or exact symbol name. Use after "
-          "graph_query to understand how a symbol is used.",
+          "One symbol in depth: its source snippet plus its neighbor edges (most important first). "
+          "Accepts a node id or exact symbol name. Use after graph_query to understand how a symbol "
+          "is used. Pass relation to ask one typed structural question instead of post-filtering a "
+          "mixed neighbor dump: find callers (direction:in, relation:CALLS), find callees "
+          "(direction:out, relation:CALLS), find references (relation:references), trace imports "
+          "(relation:imports), inspect inheritance/implementation (relation:inherits).",
           {{"id", string_param("node id or exact symbol name")},
            {"direction", {{"type", "string"}, {"enum", {"in", "out", "both"}},
                           {"description", "in = callers/importers only, out = callees/imports only (default both)"}}},
+           {"relation", string_param("only edges of this relation (exact, case-sensitive), e.g. CALLS, "
+                                     "references, imports, inherits, contains")},
            {"limit", integer_param("max neighbor edges returned (default 100)")}}),
       tool_schema(
           "graph_impact",
