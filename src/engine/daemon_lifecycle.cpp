@@ -145,7 +145,15 @@ bool persist_graph_snapshot(const DaemonState& state, const std::filesystem::pat
     if (!output) {
       return false;
     }
-    output << to_node_link_json(*read_graph_snapshot(state)).dump(2) << '\n';
+    // Session-memory nodes are NOT persisted to graph.json: their on-disk sidecar
+    // fragments are the sole source of truth and are re-overlaid after load. This
+    // keeps one source of truth for memory and avoids a divergent persisted copy.
+    auto snapshot = *read_graph_snapshot(state);
+    std::erase_if(snapshot.nodes, [](const Node& node) { return is_memory_node_id(node.id); });
+    std::erase_if(snapshot.edges, [](const Edge& edge) {
+      return is_memory_node_id(edge.source) || is_memory_node_id(edge.target);
+    });
+    output << to_node_link_json(snapshot).dump(2) << '\n';
   }
 
   std::filesystem::rename(temp_path, graph_path, error);

@@ -1,5 +1,6 @@
 #include "cgraph/daemon_ops.hpp"
 
+#include "cgraph/fragment_json.hpp"
 #include "cgraph/graph_builder.hpp"
 #include "cgraph/protocol.hpp"
 #include "cgraph/semantic_connectivity.hpp"
@@ -1196,6 +1197,20 @@ constexpr std::size_t kMaxCheckpointBodyChars = 16384;
     fragment.edges.push_back(
         Edge{.source = id, .target = target, .relation = "concerns", .confidence = Confidence::Inferred});
   }
+
+  // Durable sidecar: the fragment beside the body is the source of truth for this
+  // checkpoint. It is re-overlaid after every graph rebuild (see ingest_all_memory),
+  // so the checkpoint survives restarts, incremental edits, and full rescans -- the
+  // live snapshot node below is only the immediate, in-session copy.
+  const auto sidecar = std::filesystem::path(path).replace_extension(".json");
+  {
+    std::ofstream out(sidecar, std::ios::binary);
+    if (!out) {
+      return error_response("failed to write checkpoint sidecar: " + sidecar.generic_string());
+    }
+    out << to_json(fragment).dump(2) << '\n';
+  }
+
   mutate_graph_snapshot(state, [&](GraphSnapshot& current) { merge_fragment(current, fragment); });
 
   return ok_response({

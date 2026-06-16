@@ -1,6 +1,10 @@
 #include "cgraph/daemon_ops.hpp"
 
+#include "cgraph/daemon_lifecycle.hpp"
+#include "cgraph/fragment_json.hpp"
+#include "cgraph/graph_builder.hpp"
 #include "cgraph/protocol.hpp"
+#include "cgraph/semantic_fragment_validation.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -611,6 +615,128 @@ int main() {
       if (cgraph::is_memory_node_id(item.value("id", std::string{}))) {
         return 99;
       }
+    }
+
+    fs::remove_all(memdir);
+  }
+
+  // --- session-memory overlay: the on-disk sidecar is the durable source of
+  //     truth; it survives a snapshot rebuild via re-overlay, is idempotent,
+  //     graph.json omits memory, and recall tolerates a dangling concerns edge ---
+  {
+    const auto memdir = fs::temp_directory_path() / "cgraph-memory-overlay-test";
+    fs::remove_all(memdir);
+
+    cgraph::DaemonState s;
+    s.memory_dir = memdir;
+    cgraph::GraphSnapshot g;
+    g.build_state = cgraph::BuildState::DeterministicReady;
+    g.nodes.push_back(cgraph::Node{.id = "fn:charge", .label = "charge_card", .kind = "function"});
+    cgraph::publish_graph_snapshot(s, std::move(g));
+
+    const auto rem = cgraph::handle_daemon_request(
+        s, cgraph::make_request("remember",
+                                {{"title", "Refund"}, {"body", "wip refund"}, {"touches", {"charge_card"}}}));
+    const auto cp_id = rem["result"].value("id", std::string{});
+    const auto body_path = fs::path(rem["result"].value("source_file", std::string{}));
+    const auto sidecar = fs::path(body_path).replace_extension(".json");
+
+    // Sidecar exists beside the body and parses into a fragment with the
+    // checkpoint node + its concerns edge.
+    if (!fs::exists(sidecar)) {
+      return 100;
+    }
+    {
+      std::ifstream in(sidecar);
+      const auto parsed = nlohmann::json::parse(in, nullptr, false);
+      cgraph::Fragment frag;
+      std::vector<std::string> errs;
+      if (parsed.is_discarded() || !cgraph::parse_fragment(parsed, frag, errs)) {
+        return 101;
+      }
+      bool has_node = false;
+      bool has_edge = false;
+      for (const auto& node : frag.nodes) {
+        if (node.id == cp_id) {
+          has_node = true;
+        }
+      }
+      for (const auto& edge : frag.edges) {
+        if (edge.relation == "concerns" && edge.target == "fn:charge") {
+          has_edge = true;
+        }
+      }
+      if (!has_node || !has_edge) {
+        return 101;
+      }
+    }
+
+    // The daemon-persisted graph.json omits memory nodes (sidecar is sole truth).
+    const auto gpath = memdir / "graph.json";
+    if (!cgraph::persist_graph_snapshot(s, gpath)) {
+      return 102;
+    }
+    {
+      std::ifstream in(gpath);
+      const auto j = nlohmann::json::parse(in, nullptr, false);
+      for (const auto& node : j["nodes"]) {
+        if (cgraph::is_memory_node_id(node.value("id", std::string{}))) {
+          return 102;
+        }
+      }
+    }
+
+    // Re-overlay from the sidecar = the ingest_all_memory mechanism.
+    const auto overlay = [&]() {
+      auto validation = cgraph::validate_semantic_fragment_file(sidecar);
+      if (!validation.valid) {
+        return false;
+      }
+      cgraph::mutate_graph_snapshot(
+          s, [&](cgraph::GraphSnapshot& graph) { cgraph::merge_fragment(graph, validation.fragment); });
+      return true;
+    };
+
+    // Simulate a rebuild: publish a fresh extraction-only snapshot (no memory).
+    {
+      cgraph::GraphSnapshot rebuilt;
+      rebuilt.build_state = cgraph::BuildState::DeterministicReady;
+      rebuilt.nodes.push_back(cgraph::Node{.id = "fn:charge", .label = "charge_card", .kind = "function"});
+      cgraph::publish_graph_snapshot(s, std::move(rebuilt));
+    }
+    if (cgraph::handle_daemon_request(s, cgraph::make_request("recall", {}))["result"].value("total", 1) != 0) {
+      return 103;  // the rebuild dropped the checkpoint
+    }
+    if (!overlay()) {
+      return 104;
+    }
+    const auto rec = cgraph::handle_daemon_request(s, cgraph::make_request("recall", {}))["result"];
+    if (rec.value("total", 0) != 1 || rec["checkpoints"][0].value("label", std::string{}) != "Refund" ||
+        rec["checkpoints"][0]["concerns"].size() != 1) {
+      return 104;  // re-overlay restores the checkpoint and its resolvable link
+    }
+
+    // Idempotent: a second overlay duplicates nothing.
+    const auto before = cgraph::read_graph_snapshot(s);
+    const auto nodes_before = before->nodes.size();
+    const auto edges_before = before->edges.size();
+    overlay();
+    const auto after = cgraph::read_graph_snapshot(s);
+    if (after->nodes.size() != nodes_before || after->edges.size() != edges_before) {
+      return 105;
+    }
+
+    // Dangling concerns: rebuild WITHOUT the code target, re-overlay, recall skips
+    // the missing link without erroring.
+    {
+      cgraph::GraphSnapshot no_target;
+      no_target.build_state = cgraph::BuildState::DeterministicReady;  // charge_card gone
+      cgraph::publish_graph_snapshot(s, std::move(no_target));
+    }
+    overlay();
+    const auto rec2 = cgraph::handle_daemon_request(s, cgraph::make_request("recall", {}))["result"];
+    if (rec2.value("total", 0) != 1 || rec2["checkpoints"][0]["concerns"].size() != 0) {
+      return 106;
     }
 
     fs::remove_all(memdir);

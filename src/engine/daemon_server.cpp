@@ -11,6 +11,8 @@
 #include "cgraph/semantic_cache.hpp"
 #include "cgraph/semantic_chunk_plan.hpp"
 #include "cgraph/semantic_drop.hpp"
+#include "cgraph/graph_builder.hpp"
+#include "cgraph/semantic_fragment_validation.hpp"
 #include "cgraph/semantic_ingest.hpp"
 #include "cgraph/semantic_orchestration.hpp"
 
@@ -182,6 +184,9 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
                             ? default_semantic_drop_dir(identity.project_root / "cgraph-out")
                             : options.drop_dir;
   const auto cache_path = drop_dir / "semantic-cache.json";
+  // Session-memory checkpoint sidecars live here, separate from semantic-drop, so
+  // the two host-authored layers are overlaid and managed independently.
+  const auto memory_dir = identity.project_root / "cgraph-out" / "memory";
   SemanticCache cache = read_semantic_cache(cache_path);
   // Stat cache for the enrichment plan walk: lets a refresh reuse stored hashes
   // for unchanged docs/media instead of re-reading and re-hashing every file.
@@ -278,6 +283,31 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     }
   };
 
+  // Re-overlays every session-memory checkpoint sidecar (cgraph-out/memory/*.json).
+  // Memory nodes are snapshot-only and a rebuild (from index.files) drops them; the
+  // sidecars are the durable source of truth, re-merged here after every rebuild so
+  // checkpoints survive restarts, incremental edits, and full rescans. merge_fragment
+  // is first-occurrence-wins, so re-applying an already-present checkpoint is a no-op.
+  const auto ingest_all_memory = [&]() {
+    std::error_code ec;
+    if (!std::filesystem::exists(memory_dir, ec)) {
+      return;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(memory_dir, ec)) {
+      if (ec) {
+        break;
+      }
+      if (entry.path().extension() != ".json") {
+        continue;
+      }
+      auto validation = validate_semantic_fragment_file(entry.path());
+      if (!validation.valid) {
+        continue;
+      }
+      mutate_graph_snapshot(state, [&](GraphSnapshot& graph) { merge_fragment(graph, validation.fragment); });
+    }
+  };
+
   // The daemon owns the incremental file index: startup and every `update` op
   // rebuild the graph the same way (a full stat-index rescan), then re-overlay
   // semantic fragments, so `update .` keeps the resident snapshot current
@@ -337,6 +367,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     const auto result = full_stat_index_rescan(state, index, identity.project_root);
     index_hydrated.store(true);
     ingest_all_drops();
+    ingest_all_memory();  // re-overlay session-memory checkpoints dropped by the code-only rebuild
     // Persist as soon as the graph is final (post semantic overlay) and before
     // enrichment planning, which walks the whole project and can take seconds on
     // a large repo. The Tier-1 cache should land promptly, not behind planning.
@@ -373,6 +404,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
       return false;
     }
     ingest_all_drops();
+    ingest_all_memory();  // checkpoints re-overlaid from sidecars; graph.json holds none
     // Log the fast-path load immediately — before enrichment planning, which
     // walks the whole project and can take seconds.
     std::cerr << "graphd: loaded persisted graph (" << detected.size() << " files unchanged)\n";
@@ -387,7 +419,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   };
   // Session-memory checkpoint bodies are written under cgraph-out/memory by the
   // `remember` op; the node points at the markdown via source_file.
-  state.memory_dir = out_dir / "memory";
+  state.memory_dir = memory_dir;
 
   // Live code watching: the serve loop polls the project tree on its own cadence
   // and folds changed files into the graph incrementally. The watcher is primed
@@ -521,7 +553,8 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
           result = full_stat_index_rescan(state, index, identity.project_root);
           index_hydrated.store(true);
         }
-        ingest_all_drops();  // the rebuild is code-only; re-overlay semantic fragments
+        ingest_all_drops();   // the rebuild is code-only; re-overlay semantic fragments
+        ingest_all_memory();  // and re-overlay session-memory checkpoints
         ++state.incremental_updates;
         mark_graph_dirty(lifecycle, DaemonClock::now());
         last_activity = FileWatcherClock::now();  // active editing keeps the daemon alive
