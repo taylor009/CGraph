@@ -110,6 +110,26 @@ namespace {
           "is still running and query results may be empty), whether live file watching is active, "
           "and semantic enrichment progress.",
           nlohmann::json::object()),
+      tool_schema(
+          "graph_remember",
+          "Checkpoint task state so you can /compact or /clear a long session without losing the "
+          "thread. cgraph is external to your context, so a checkpoint survives /clear. Write a "
+          "distilled summary (what you did, what's next) -- never raw tool output, browser DOMs, or "
+          "chain-of-thought. List the code symbols it touches so recall can link back to them. "
+          "Call this before /compact or /clear and after a long exploration.",
+          {{"title", string_param("short title for the checkpoint")},
+           {"body", string_param("distilled markdown summary: what was done and what is next")},
+           {"touches", {{"type", "array"}, {"items", {{"type", "string"}}},
+                        {"description", "node ids or exact symbol names the checkpoint concerns"}}},
+           {"tags", {{"type", "array"}, {"items", {{"type", "string"}}},
+                     {"description", "optional labels for filtering on recall"}}}}),
+      tool_schema(
+          "graph_recall",
+          "Restore task state after /clear: returns recent checkpoints newest-first, each with its "
+          "summary and briefs of the code it touched. Then use graph_context on a linked node to "
+          "reload bounded code context. The fastest way to resume a long session.",
+          {{"query", string_param("optional filter over checkpoint titles/tags")},
+           {"limit", integer_param("max checkpoints returned (default 10)")}}),
       tool_schema("graph_shutdown", "Ask the per-project graph daemon to shut down", nlohmann::json::object()),
   });
 }
@@ -135,6 +155,12 @@ namespace {
     // Forward arguments verbatim; the daemon op applies budget/depth defaults and
     // resolves the focal node from id, label, or query.
     return make_request("context", arguments);
+  }
+  if (name == "graph_remember") {
+    return make_request("remember", arguments);
+  }
+  if (name == "graph_recall") {
+    return make_request("recall", arguments.empty() ? nlohmann::json::object() : arguments);
   }
   if (name == "graph_update") {
     return make_request("update", arguments.empty() ? nlohmann::json::object() : arguments);

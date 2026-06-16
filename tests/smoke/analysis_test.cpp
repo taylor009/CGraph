@@ -49,5 +49,48 @@ int main() {
     return 1;
   }
 
+  // Session-memory nodes are inert to analysis: they receive no centrality or
+  // god_node, and adding one (with a concerns edge to code) does not shift any
+  // code node's centrality.
+  {
+    const auto build = []() {
+      cgraph::GraphSnapshot g;
+      g.nodes.push_back(cgraph::Node{.id = "fn:a", .label = "a"});
+      g.nodes.push_back(cgraph::Node{.id = "fn:b", .label = "b"});
+      g.edges.push_back(cgraph::Edge{.source = "fn:a", .target = "fn:b", .relation = "CALLS"});
+      return g;
+    };
+    auto baseline = build();
+    cgraph::analyze_graph(baseline);
+
+    auto with_memory = build();
+    with_memory.nodes.push_back(cgraph::Node{.id = "memory:checkpoint:1", .label = "cp", .kind = "checkpoint"});
+    with_memory.edges.push_back(
+        cgraph::Edge{.source = "memory:checkpoint:1", .target = "fn:a", .relation = "concerns"});
+    cgraph::analyze_graph(with_memory);
+
+    const auto centrality_of = [](const cgraph::GraphSnapshot& g, const std::string& id) {
+      for (const auto& node : g.nodes) {
+        if (node.id == id) {
+          const auto it = node.properties.find("degree_centrality");
+          return it == node.properties.end() ? std::string{"<none>"} : it->second;
+        }
+      }
+      return std::string{"<missing>"};
+    };
+    // Code-node centrality is identical with and without the memory node + edge.
+    if (centrality_of(baseline, "fn:a") != centrality_of(with_memory, "fn:a") ||
+        centrality_of(baseline, "fn:b") != centrality_of(with_memory, "fn:b")) {
+      return 2;
+    }
+    // The memory node itself carries neither centrality nor god_node.
+    for (const auto& node : with_memory.nodes) {
+      if (node.id == "memory:checkpoint:1" &&
+          (node.properties.contains("degree_centrality") || node.properties.contains("god_node"))) {
+        return 3;
+      }
+    }
+  }
+
   return 0;
 }

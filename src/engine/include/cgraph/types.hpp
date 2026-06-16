@@ -3,12 +3,20 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
 namespace cgraph {
 
 using Properties = std::unordered_map<std::string, std::string>;
+
+// Session-memory checkpoint nodes live in the `memory:` id namespace (mirroring
+// the `doc:`/`concept:` prefix convention). They are host/agent-authored notes,
+// inert to code analysis and code retrieval — see graph-session-memory.
+[[nodiscard]] inline bool is_memory_node_id(std::string_view id) {
+  return id.starts_with("memory:");
+}
 
 enum class Confidence {
   Extracted,

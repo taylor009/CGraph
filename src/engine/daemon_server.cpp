@@ -385,6 +385,9 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     lifecycle.graph_dirty = false;
     return result;
   };
+  // Session-memory checkpoint bodies are written under cgraph-out/memory by the
+  // `remember` op; the node points at the markdown via source_file.
+  state.memory_dir = out_dir / "memory";
 
   // Live code watching: the serve loop polls the project tree on its own cadence
   // and folds changed files into the graph incrementally. The watcher is primed
@@ -557,6 +560,11 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     // The thin client uses one connection per request: read it, answer it, close.
     if (const auto request = read_frame(conn)) {
       const auto response = handle_daemon_request(state, *request);
+      // A successful `remember` mutates the snapshot; mark it dirty so the
+      // checkpoint node is persisted into graph.json and survives a restart.
+      if (request->value("op", std::string{}) == "remember" && response.value("ok", false)) {
+        mark_graph_dirty(lifecycle, DaemonClock::now());
+      }
       (void)write_frame(conn, response);
     }
     ::close(conn);

@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -55,6 +56,10 @@ struct DaemonState {
   // project root); when unset, `update` is accepted as a no-op so in-process
   // callers and tests need no rebuild wiring.
   std::function<nlohmann::json(const nlohmann::json& params)> update_handler;
+  // Directory the `remember` op writes checkpoint markdown bodies into (set by
+  // the running daemon to <project>/cgraph-out/memory). Empty disables the write
+  // op (returns an error) so in-process callers without a project dir are safe.
+  std::filesystem::path memory_dir;
 };
 
 // Marks an enrichment ingest as in-flight for the lifetime of the scope:

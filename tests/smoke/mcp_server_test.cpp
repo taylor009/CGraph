@@ -115,6 +115,32 @@ int main() {
     return 1;
   }
 
+  // graph_remember / graph_recall forward to the session-memory ops so an agent
+  // can checkpoint before /clear and recall after it.
+  const auto remembered = cgraph::handle_mcp_request(
+      nlohmann::json{
+          {"jsonrpc", "2.0"},
+          {"id", 8},
+          {"method", "tools/call"},
+          {"params",
+           {{"name", "graph_remember"},
+            {"arguments", {{"title", "T"}, {"body", "B"}, {"touches", {"a"}}}}}}},
+      forwarder);
+  if (remembered.contains("error") || forwarded["op"] != "remember" ||
+      forwarded["params"]["title"] != "T" || forwarded["params"]["touches"][0] != "a") {
+    return 1;
+  }
+  const auto recalled = cgraph::handle_mcp_request(
+      nlohmann::json{
+          {"jsonrpc", "2.0"},
+          {"id", 9},
+          {"method", "tools/call"},
+          {"params", {{"name", "graph_recall"}, {"arguments", {{"limit", 3}}}}}},
+      forwarder);
+  if (recalled.contains("error") || forwarded["op"] != "recall" || forwarded["params"]["limit"] != 3) {
+    return 1;
+  }
+
   const auto unknown = cgraph::handle_mcp_request(
       nlohmann::json{{"jsonrpc", "2.0"}, {"id", 4}, {"method", "tools/call"}, {"params", {{"name", "missing"}}}},
       forwarder);

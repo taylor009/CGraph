@@ -1,11 +1,14 @@
 #include "cgraph/daemon_ops.hpp"
 
+#include "cgraph/graph_builder.hpp"
 #include "cgraph/protocol.hpp"
 #include "cgraph/semantic_connectivity.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <queue>
@@ -266,6 +269,9 @@ struct Snippet {
   const auto lower_needle = ascii_lower(needle);
   std::vector<const Node*> matches;
   for (const auto& node : graph.nodes) {
+    if (is_memory_node_id(node.id)) {
+      continue;  // session-memory checkpoints are not code matches; recall surfaces them
+    }
     if (contains_ci(node.id, lower_needle) || contains_ci(node.label, lower_needle)) {
       matches.push_back(&node);
     }
@@ -654,6 +660,9 @@ struct Snippet {
   for (const auto& [node_id, info] : reached) {
     if (node_id == focal->id) {
       continue;
+    }
+    if (is_memory_node_id(node_id)) {
+      continue;  // memory checkpoints never enter code context, even when a concerns edge makes them adjacent
     }
     if (const auto it = by_id.find(node_id); it != by_id.end()) {
       candidates.push_back(it->second);
@@ -1063,6 +1072,215 @@ struct Snippet {
   return payload;
 }
 
+// --- Session memory: checkpoint write (remember) + recall --------------------
+// Checkpoints are agent-authored notes that survive /clear (graphd is external
+// to Claude's context). The body is a markdown file under memory_dir; the node
+// points at it via source_file so the existing snippet machinery surfaces it.
+// See graph-session-memory.
+
+// ~4k tokens; large enough for a useful summary, capped so recall stays bounded.
+constexpr std::size_t kMaxCheckpointBodyChars = 16384;
+
+// A filesystem-safe slug: keep [a-z0-9], collapse every other run to a single
+// '-'. This strips path separators and dots, so a title can never traverse out
+// of memory_dir.
+[[nodiscard]] std::string slugify(std::string_view title) {
+  std::string slug;
+  for (const char ch : title) {
+    const auto uc = static_cast<unsigned char>(ch);
+    if (std::isalnum(uc) != 0) {
+      slug.push_back(static_cast<char>(std::tolower(uc)));
+    } else if (!slug.empty() && slug.back() != '-') {
+      slug.push_back('-');
+    }
+  }
+  while (!slug.empty() && slug.back() == '-') {
+    slug.pop_back();
+  }
+  if (slug.empty()) {
+    slug = "checkpoint";
+  }
+  if (slug.size() > 60) {
+    slug.resize(60);
+  }
+  return slug;
+}
+
+[[nodiscard]] nlohmann::json remember_checkpoint(DaemonState& state, const nlohmann::json& params) {
+  if (state.memory_dir.empty()) {
+    return error_response("session memory is not enabled on this daemon");
+  }
+  const auto title = params.value("title", std::string{});
+  const auto body = params.value("body", std::string{});
+  if (title.empty()) {
+    return error_response("remember requires a non-empty title");
+  }
+  if (body.size() > kMaxCheckpointBodyChars) {
+    return error_response("checkpoint body exceeds " + std::to_string(kMaxCheckpointBodyChars) + " chars");
+  }
+
+  // Resolve touches against the current snapshot BEFORE mutating; an unresolved
+  // entry yields no edge (and is reported), never a dangling target.
+  const auto graph = read_graph_snapshot(state);
+  const auto by_id = index_nodes(*graph);
+  std::vector<std::string> resolved;
+  auto unresolved = nlohmann::json::array();
+  for (const auto& touch : params.value("touches", nlohmann::json::array())) {
+    if (!touch.is_string()) {
+      continue;
+    }
+    const auto key = touch.get<std::string>();
+    if (const auto* node = resolve_node(*graph, by_id, key); node != nullptr) {
+      resolved.push_back(node->id);
+    } else {
+      unresolved.push_back(key);
+    }
+  }
+
+  // Wall-clock millis stamp the id, created_at, and recency ordering (a write
+  // boundary, like the ledger flush — the running substrate stays monotonic).
+  const auto now = std::chrono::system_clock::now();
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+  const auto ts = std::to_string(ms);
+  const auto id = "memory:checkpoint:" + ts;
+  const auto filename = ts + "-" + slugify(title) + ".md";
+
+  std::error_code ec;
+  std::filesystem::create_directories(state.memory_dir, ec);
+  const auto path = state.memory_dir / filename;
+  // Defensive sandbox: the resolved path must stay inside memory_dir.
+  const auto canon_dir = std::filesystem::weakly_canonical(state.memory_dir, ec).generic_string();
+  const auto canon_path = std::filesystem::weakly_canonical(path, ec).generic_string();
+  if (canon_dir.empty() || canon_path.rfind(canon_dir, 0) != 0) {
+    return error_response("checkpoint path escapes the memory directory");
+  }
+  const auto content = "# " + title + "\n\n" + body + "\n";
+  {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+      return error_response("failed to write checkpoint body: " + path.generic_string());
+    }
+    out << content;
+  }
+  // Span the whole body so the existing snippet machinery (read_source_snippet)
+  // surfaces it on recall / graph_context. Bounded by kMaxSnippetLines downstream.
+  const auto line_count = static_cast<std::uint32_t>(std::count(content.begin(), content.end(), '\n'));
+
+  std::string tags;
+  for (const auto& tag : params.value("tags", nlohmann::json::array())) {
+    if (!tag.is_string()) {
+      continue;
+    }
+    if (!tags.empty()) {
+      tags += ",";
+    }
+    tags += tag.get<std::string>();
+  }
+
+  Node node;
+  node.id = id;
+  node.label = title;
+  node.source_file = path.generic_string();
+  node.source_location =
+      SourceLocation{.start_line = 1, .start_column = 0, .end_line = std::max<std::uint32_t>(1, line_count), .end_column = 0};
+  node.kind = "checkpoint";
+  node.confidence = Confidence::Inferred;
+  node.properties["created_at"] = ts;
+  if (!tags.empty()) {
+    node.properties["tags"] = tags;
+  }
+
+  Fragment fragment;
+  fragment.nodes.push_back(node);
+  for (const auto& target : resolved) {
+    fragment.edges.push_back(
+        Edge{.source = id, .target = target, .relation = "concerns", .confidence = Confidence::Inferred});
+  }
+  mutate_graph_snapshot(state, [&](GraphSnapshot& current) { merge_fragment(current, fragment); });
+
+  return ok_response({
+      {"id", id},
+      {"label", title},
+      {"source_file", node.source_file},
+      {"created_at", ts},
+      {"concerns", resolved.size()},
+      {"unresolved", std::move(unresolved)},
+      {"written", true},
+  });
+}
+
+[[nodiscard]] nlohmann::json recall_checkpoints(const GraphSnapshot& graph, const nlohmann::json& params) {
+  const auto query = ascii_lower(params.value("query", params.value("q", std::string{})));
+  const auto limit = params.value("limit", std::size_t{10});
+
+  const auto by_id = index_nodes(graph);
+  std::vector<const Node*> checkpoints;
+  for (const auto& node : graph.nodes) {
+    if (!is_memory_node_id(node.id) || node.kind != "checkpoint") {
+      continue;
+    }
+    if (!query.empty()) {
+      const auto tags = node.properties.find("tags");
+      const bool hit = contains_ci(node.label, query) ||
+                       (tags != node.properties.end() && contains_ci(tags->second, query));
+      if (!hit) {
+        continue;
+      }
+    }
+    checkpoints.push_back(&node);
+  }
+
+  // Newest-first by created_at millis (longer string = larger number; equal
+  // lengths compare lexically = numerically), id as a deterministic tiebreak.
+  const auto created_at = [](const Node* node) {
+    const auto it = node->properties.find("created_at");
+    return it == node->properties.end() ? std::string{} : it->second;
+  };
+  std::ranges::sort(checkpoints, [&](const Node* lhs, const Node* rhs) {
+    const auto lv = created_at(lhs);
+    const auto rv = created_at(rhs);
+    if (lv.size() != rv.size()) {
+      return lv.size() > rv.size();
+    }
+    if (lv != rv) {
+      return lv > rv;
+    }
+    return lhs->id > rhs->id;
+  });
+
+  const auto total = checkpoints.size();
+  if (limit > 0 && checkpoints.size() > limit) {
+    checkpoints.resize(limit);
+  }
+
+  std::unordered_map<std::string, std::vector<std::string>> concerns;
+  for (const auto& edge : graph.edges) {
+    if (edge.relation == "concerns" && is_memory_node_id(edge.source)) {
+      concerns[edge.source].push_back(edge.target);
+    }
+  }
+
+  auto items = nlohmann::json::array();
+  for (const auto* checkpoint : checkpoints) {
+    auto entry = with_source(node_brief(*checkpoint), *checkpoint);  // body snippet from source_file
+    entry["created_at"] = created_at(checkpoint);
+    if (const auto tags = checkpoint->properties.find("tags"); tags != checkpoint->properties.end()) {
+      entry["tags"] = tags->second;
+    }
+    auto links = nlohmann::json::array();
+    if (const auto it = concerns.find(checkpoint->id); it != concerns.end()) {
+      for (const auto& target : it->second) {
+        if (const auto node = by_id.find(target); node != by_id.end()) {
+          links.push_back(node_brief(*node->second));
+        }
+      }
+    }
+    entry["concerns"] = std::move(links);
+    items.push_back(std::move(entry));
+  }
+  return {{"checkpoints", std::move(items)}, {"total", total}, {"returned", items.size()}};
+}
+
 }  // namespace
 
 std::shared_ptr<const GraphSnapshot> read_graph_snapshot(const DaemonState& state) {
@@ -1088,7 +1306,10 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
     return error_response("protocol version mismatch");
   }
   const auto op = request.value("op", std::string{});
-  const auto params = request.value("params", nlohmann::json::object());
+  auto params = request.value("params", nlohmann::json::object());
+  if (!params.is_object()) {
+    params = nlohmann::json::object();  // tolerate a null/absent params; ops read it with .value()
+  }
   const auto graph = read_graph_snapshot(state);
 
   const auto known_op = daemon_op_from_string(op);
@@ -1140,6 +1361,17 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
         state.shutdown_requested = true;
         response = ok_response({{"shutdown", true}});
         break;
+      case DaemonOp::Remember:
+        // remember_checkpoint returns a full ok/error envelope (it can reject a
+        // disabled daemon, oversize body, or path escape), so it is not wrapped.
+        response = remember_checkpoint(state, params);
+        break;
+      case DaemonOp::Recall: {
+        auto result = recall_checkpoints(*graph, params);
+        zero_hit = result.value("total", std::size_t{0}) == 0;
+        response = ok_response(annotate_build_state(std::move(result), *graph));
+        break;
+      }
       case DaemonOp::Count:
         break;  // unreachable: daemon_op_from_string never yields Count
     }

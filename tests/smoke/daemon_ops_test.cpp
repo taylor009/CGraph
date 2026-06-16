@@ -494,6 +494,128 @@ int main() {
     }
   }
 
+  // --- session memory: remember writes a sandboxed checkpoint; recall returns
+  //     checkpoints newest-first with body + linked code briefs; memory nodes are
+  //     inert to code query/context ---
+  {
+    const auto memdir = fs::temp_directory_path() / "cgraph-memory-test";
+    fs::remove_all(memdir);
+
+    cgraph::DaemonState s;
+    s.memory_dir = memdir;
+    cgraph::GraphSnapshot g;
+    g.build_state = cgraph::BuildState::DeterministicReady;
+    g.nodes.push_back(cgraph::Node{
+        .id = "fn:charge", .label = "charge_card", .kind = "function",
+        .properties = {{"degree_centrality", "0.500000"}}});
+    g.nodes.push_back(cgraph::Node{.id = "fn:log", .label = "log_event", .kind = "function"});
+    cgraph::publish_graph_snapshot(s, std::move(g));
+
+    // A daemon without a memory_dir rejects remember rather than writing anywhere.
+    {
+      cgraph::DaemonState off;
+      cgraph::publish_graph_snapshot(off, cgraph::GraphSnapshot{});
+      const auto r = cgraph::handle_daemon_request(
+          off, cgraph::make_request("remember", {{"title", "x"}, {"body", "y"}}));
+      if (r["ok"].get<bool>()) {
+        return 90;
+      }
+    }
+
+    // First checkpoint: one resolvable touch (charge_card) + one unresolved.
+    const auto rem = cgraph::handle_daemon_request(
+        s, cgraph::make_request("remember", {{"title", "Refactor charge"},
+                                             {"body", "did X; next Y"},
+                                             {"touches", {"charge_card", "nope_missing"}},
+                                             {"tags", {"auth"}}}));
+    const auto& rr = rem["result"];
+    if (!rem["ok"].get<bool>() || rr.value("written", false) != true ||
+        rr.value("id", std::string{}).rfind("memory:checkpoint:", 0) != 0) {
+      return 91;
+    }
+    if (rr.value("concerns", 0) != 1 || rr["unresolved"].size() != 1 ||
+        rr["unresolved"][0].get<std::string>() != "nope_missing") {
+      return 92;
+    }
+    // Body file landed inside the sandbox dir; the node points at it.
+    const auto body_path = fs::path(rr.value("source_file", std::string{}));
+    if (body_path.parent_path() != memdir || !fs::exists(body_path)) {
+      return 93;
+    }
+    // The checkpoint node + a concerns edge to the resolved node ONLY are in the graph.
+    {
+      const auto snap = cgraph::read_graph_snapshot(s);
+      bool has_checkpoint = false;
+      bool concerns_resolved = false;
+      bool concerns_unresolved = false;
+      for (const auto& node : snap->nodes) {
+        if (node.id == rr["id"].get<std::string>()) {
+          has_checkpoint = node.kind == "checkpoint";
+        }
+      }
+      for (const auto& edge : snap->edges) {
+        if (edge.relation == "concerns" && edge.target == "fn:charge") {
+          concerns_resolved = true;
+        }
+        if (edge.relation == "concerns" && edge.target == "nope_missing") {
+          concerns_unresolved = true;
+        }
+      }
+      if (!has_checkpoint || !concerns_resolved || concerns_unresolved) {
+        return 94;
+      }
+    }
+
+    // An oversized body is rejected with no node added.
+    const auto count_before = cgraph::read_graph_snapshot(s)->nodes.size();
+    const auto oversize = cgraph::handle_daemon_request(
+        s, cgraph::make_request("remember", {{"title", "big"}, {"body", std::string(20000, 'x')}}));
+    if (oversize["ok"].get<bool>() || cgraph::read_graph_snapshot(s)->nodes.size() != count_before) {
+      return 95;
+    }
+
+    // Second checkpoint (later timestamp) so recall ordering is observable.
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    cgraph::handle_daemon_request(
+        s, cgraph::make_request("remember", {{"title", "Second task"}, {"body", "later work"}}));
+
+    // Recall: newest-first, body snippet readable, linked code brief present.
+    const auto rec = cgraph::handle_daemon_request(s, cgraph::make_request("recall", {}));
+    const auto& cps = rec["result"]["checkpoints"];
+    if (cps.size() != 2 || cps[0].value("label", std::string{}) != "Second task" ||
+        cps[1].value("label", std::string{}) != "Refactor charge") {
+      return 96;  // newest-first
+    }
+    if (cps[1].value("snippet", std::string{}).find("did X") == std::string::npos) {
+      return 97;  // body is snippet-readable through source_file
+    }
+    if (cps[1]["concerns"].size() != 1 ||
+        cps[1]["concerns"][0].value("label", std::string{}) != "charge_card") {
+      return 97;  // linked code brief
+    }
+    // query filter over title narrows recall.
+    const auto rec_q = cgraph::handle_daemon_request(s, cgraph::make_request("recall", {{"query", "second"}}));
+    if (rec_q["result"]["checkpoints"].size() != 1) {
+      return 98;
+    }
+
+    // Memory is inert to code retrieval: a checkpoint title is not a code query
+    // match, and a checkpoint is never packed into code context.
+    const auto code_q = cgraph::handle_daemon_request(s, cgraph::make_request("query", {{"q", "Refactor"}}));
+    if (code_q["result"].value("total", 1U) != 0U) {
+      return 99;
+    }
+    const auto ctx = cgraph::handle_daemon_request(
+        s, cgraph::make_request("context", {{"id", "charge_card"}, {"budget", 5000}}));
+    for (const auto& item : ctx["result"]["included"]) {
+      if (cgraph::is_memory_node_id(item.value("id", std::string{}))) {
+        return 99;
+      }
+    }
+
+    fs::remove_all(memdir);
+  }
+
   // --- typed explain: a relation filter narrows neighbors to one edge type and
   //     composes with direction; an absent relation returns the full set ---
   {
