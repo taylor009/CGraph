@@ -74,6 +74,7 @@ int main() {
   // present in the graph (ties by id) -- mirrors research/metric.py::resolve_focal.
   struct Row {
     std::string focal;
+    std::string query;  // needed for the adaptive gather gate (query-term overlap)
     std::set<std::string> grade2;
   };
   std::vector<Row> rows;
@@ -106,7 +107,7 @@ int main() {
       }
     }
     if (focal != nullptr) {
-      rows.push_back({focal->id, std::move(grade2)});
+      rows.push_back({focal->id, row.value("query", std::string{}), std::move(grade2)});
     }
   }
 
@@ -163,6 +164,66 @@ int main() {
     }
     std::cout << "  " << t.budget << "    " << greedy << "    " << knapsack << "    " << t.expect
               << "    " << delta << "    " << (t.gated ? (ok ? "PASS" : "FAIL") : "neutral") << "\n";
+  }
+
+  // --- Adaptive gather revalidation (in-engine, this graph) -------------------
+  // The Python harness (research/recall_lever.py) showed adaptive gather beats the
+  // k=2 greedy baseline at a fraction of k=3's candidate cost. That result is
+  // EVIDENCE; this block is the in-engine revalidation under the engine's own
+  // accounting. Adaptive must (a) beat the true greedy@k=2 baseline materially and
+  // (b) stay at/below full k=3 recall while gathering far fewer candidates.
+  const auto measure = [&](const std::string& packing, const std::string& gather, int max_depth,
+                           int budget) -> std::pair<double, double> {
+    double rsum = 0.0;
+    double csum = 0.0;
+    int n = 0;
+    for (const auto& row : rows) {
+      nlohmann::json params{{"id", row.focal}, {"budget", budget}, {"packing", packing}, {"max_depth", max_depth}};
+      if (gather == "adaptive") {
+        params["gather"] = "adaptive";
+        params["gather_theta"] = 0.05;
+        params["q"] = row.query;  // the gate needs the query terms
+      }
+      const auto result = cgraph::handle_daemon_request(state, cgraph::make_request("context", params))["result"];
+      std::set<std::string> selected;
+      if (result.contains("focus") && result["focus"].is_object()) {
+        selected.insert(result["focus"].value("id", std::string{}));
+      }
+      const auto included = result.value("included", nlohmann::json::array());
+      for (const auto& entry : included) {
+        selected.insert(entry.value("id", std::string{}));
+      }
+      const double cand = static_cast<double>(included.size()) + result.value("omitted", 0);
+      std::size_t hit = 0;
+      for (const auto& id : row.grade2) {
+        if (selected.count(id) != 0) {
+          ++hit;
+        }
+      }
+      if (!row.grade2.empty()) {
+        rsum += static_cast<double>(hit) / static_cast<double>(row.grade2.size());
+        csum += cand;
+        ++n;
+      }
+    }
+    return {n != 0 ? rsum / n : 0.0, n != 0 ? csum / n : 0.0};
+  };
+
+  std::cout << "\nadaptive gather revalidation (in-engine, N=" << rows.size() << ")\n";
+  std::cout << "budget   greedy@k2   adaptive   knap@k3   d(adp-k2)   cand k2/adp/k3   gate\n";
+  for (const int budget : {2000, 4000}) {  // 8k neutral: the ego graph mostly fits
+    const auto [r_k2, c_k2] = measure("greedy", "fixed", 2, budget);
+    const auto [r_adp, c_adp] = measure("knapsack", "adaptive", 3, budget);
+    const auto [r_k3, c_k3] = measure("knapsack", "fixed", 3, budget);
+    const double delta = r_adp - r_k2;
+    // Material gain over the true baseline, no worse than full k3 recall, and a
+    // strictly smaller candidate pool than k3 (the recall/cost win, in-engine).
+    const bool ok = delta >= 0.03 && r_adp <= r_k3 + 0.02 && c_adp < c_k3;
+    if (!ok) {
+      ++failures;
+    }
+    std::cout << "  " << budget << "   " << r_k2 << "   " << r_adp << "   " << r_k3 << "   " << delta << "   "
+              << c_k2 << "/" << c_adp << "/" << c_k3 << "   " << (ok ? "PASS" : "FAIL") << "\n";
   }
 
   if (failures != 0) {

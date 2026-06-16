@@ -82,7 +82,12 @@ namespace {
           {{"id", string_param("node id or exact symbol name to focus on")},
            {"query", string_param("free-text fallback when the id is unknown; the best match becomes the focus")},
            {"budget", integer_param("token budget for the bundle (default 6000)")},
-           {"max_depth", integer_param("neighborhood radius in hops (default 2)")}}),
+           {"max_depth", integer_param("neighborhood radius in hops (default 2)")},
+           {"gather", {{"type", "string"}, {"enum", {"fixed", "adaptive"}},
+                       {"description", "fixed = k-hop neighborhood (default); adaptive = keep the 2-hop core but "
+                                       "expand the 3rd hop only along query-relevant nodes (needs query/q)"}}},
+           {"gather_theta", {{"type", "number"},
+                             {"description", "adaptive gate: min query-term overlap to expand past 2 hops (default 0.05)"}}}}),
       tool_schema(
           "graph_update",
           "Force an immediate full rescan of the project. Usually unnecessary: the daemon watches "

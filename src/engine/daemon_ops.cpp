@@ -567,7 +567,14 @@ struct Snippet {
   // step-A-validated 0/1 knapsack fill). Knapsack gathers a wider ego graph by
   // default. The flag is the rollback boundary: greedy is untouched.
   const auto packing = params.value("packing", std::string{"greedy"});
-  const int default_depth = packing == "knapsack" ? kKnapsackContextDepth : kDefaultContextDepth;
+  // Adaptive relevance-gated gather (flag-gated, default "fixed" = unchanged): keeps
+  // the full 2-hop core but expands past depth 1 only along query-relevant nodes,
+  // reaching beyond 2 hops without the full 3-hop fan-out. Implies the knapsack fill.
+  const auto gather = params.value("gather", std::string{"fixed"});
+  const bool adaptive = gather == "adaptive";
+  const double gather_theta = std::clamp(params.value("gather_theta", 0.05), 0.0, 1.0);
+  const bool use_knapsack = packing == "knapsack" || adaptive;
+  const int default_depth = use_knapsack ? kKnapsackContextDepth : kDefaultContextDepth;
   const auto max_depth = std::max(0, params.value("max_depth", default_depth));
   const auto by_id = index_nodes(graph);
 
@@ -588,6 +595,9 @@ struct Snippet {
             {"included", nlohmann::json::array()}, {"omitted", 0},
             {"suggestions", suggest_similar(graph, id.empty() ? needle : id)}};
   }
+
+  // Query terms for the adaptive gather gate and the knapsack relevance value.
+  const auto query_terms = lexical_terms(needle);
 
   // Undirected neighborhood: callers, callees, container, and siblings reachable
   // within max_depth are all relevant context for understanding the focal symbol.
@@ -610,6 +620,15 @@ struct Snippet {
     const auto depth = reached[current].depth;
     if (depth >= max_depth) {
       continue;
+    }
+    // Adaptive gather: past the 2-hop core, expand a node only when it is relevant
+    // to the query, so the third hop follows relevant paths, not the whole ball.
+    if (adaptive && depth >= 2) {
+      const auto node_it = by_id.find(current);
+      if (node_it == by_id.end() ||
+          query_term_overlap(query_terms, node_it->second->label) < gather_theta) {
+        continue;
+      }
     }
     const auto links = adjacency.find(current);
     if (links == adjacency.end()) {
@@ -655,8 +674,7 @@ struct Snippet {
   // step-A fix), value = relevance (nearer hops + query-term overlap). The focal is
   // always included; the knapsack fills the remaining budget. No brief-degradation
   // here -- selection is whole-or-nothing, matching the validated harness.
-  if (packing == "knapsack") {
-    const auto query_terms = lexical_terms(needle);
+  if (use_knapsack) {
     std::vector<std::size_t> weight(candidates.size());
     std::vector<double> value(candidates.size());
     std::size_t total_weight = 0;
@@ -729,6 +747,7 @@ struct Snippet {
         {"budget", budget},
         {"tokens_used", used},
         {"packing", "knapsack"},
+        {"gather", adaptive ? "adaptive" : "fixed"},
         {"included", std::move(included)},
         {"omitted", omitted}};
     if (omitted > 0) {

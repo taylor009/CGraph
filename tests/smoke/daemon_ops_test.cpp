@@ -6,6 +6,8 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <set>
+#include <string>
 #include <thread>
 
 int main() {
@@ -360,6 +362,69 @@ int main() {
     if (sem2["doc_nodes"] != 0 || sem2["concept_nodes"] != 0 ||
         sem2["connectivity_rate"].get<double>() != 0.0) {
       return 52;
+    }
+  }
+
+  // --- adaptive relevance-gated gather: the 3rd hop is taken only from a query-
+  //     relevant depth-2 node; the 2-hop core is always preserved ---
+  {
+    cgraph::DaemonState s;
+    cgraph::GraphSnapshot g;
+    g.build_state = cgraph::BuildState::DeterministicReady;
+    // F -> n1 -> {rel "PaymentValidator", irr "LoggingHelper"} -> {d3a, d3b}.
+    // Only "rel" matches the query "Payment", so adaptive should reach d3a (via rel)
+    // but gate out d3b (via irr).
+    g.nodes.push_back(cgraph::Node{.id = "F", .label = "Root", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{.id = "n1", .label = "Mid", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{.id = "rel", .label = "PaymentValidator", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{.id = "irr", .label = "LoggingHelper", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{.id = "d3a", .label = "ChargeCard", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{.id = "d3b", .label = "FormatString", .kind = "function"});
+    g.edges.push_back(cgraph::Edge{.source = "F", .target = "n1", .relation = "CALLS"});
+    g.edges.push_back(cgraph::Edge{.source = "n1", .target = "rel", .relation = "CALLS"});
+    g.edges.push_back(cgraph::Edge{.source = "n1", .target = "irr", .relation = "CALLS"});
+    g.edges.push_back(cgraph::Edge{.source = "rel", .target = "d3a", .relation = "CALLS"});
+    g.edges.push_back(cgraph::Edge{.source = "irr", .target = "d3b", .relation = "CALLS"});
+    cgraph::publish_graph_snapshot(s, std::move(g));
+
+    const auto ids_of = [](const nlohmann::json& result) {
+      std::set<std::string> ids;
+      for (const auto& item : result["included"]) {
+        ids.insert(item.value("id", std::string{}));
+      }
+      return ids;
+    };
+
+    // Fixed gather at depth 3 (knapsack) reaches BOTH third-hop nodes.
+    const auto fixed = cgraph::handle_daemon_request(
+        s, cgraph::make_request(
+               "context", {{"id", "F"}, {"q", "Payment"}, {"packing", "knapsack"}, {"max_depth", 3}, {"budget", 100000}}));
+    const auto fixed_ids = ids_of(fixed["result"]);
+    if (fixed_ids.count("d3a") == 0 || fixed_ids.count("d3b") == 0) {
+      return 60;  // fixed 3-hop must reach both third-hop nodes
+    }
+    if (fixed["result"].value("gather", std::string{}) != "fixed") {
+      return 61;
+    }
+
+    // Adaptive keeps the 2-hop core (rel, irr) but expands the 3rd hop ONLY from the
+    // query-relevant depth-2 node -> d3a present (via PaymentValidator), d3b absent.
+    const auto adaptive = cgraph::handle_daemon_request(
+        s, cgraph::make_request(
+               "context", {{"id", "F"}, {"q", "Payment"}, {"gather", "adaptive"}, {"gather_theta", 0.5}, {"budget", 100000}}));
+    const auto& ares = adaptive["result"];
+    const auto adaptive_ids = ids_of(ares);
+    if (adaptive_ids.count("rel") == 0 || adaptive_ids.count("irr") == 0) {
+      return 62;  // 2-hop core preserved regardless of relevance
+    }
+    if (adaptive_ids.count("d3a") == 0) {
+      return 63;  // relevant third hop reached
+    }
+    if (adaptive_ids.count("d3b") != 0) {
+      return 64;  // irrelevant third hop gated out
+    }
+    if (ares.value("gather", std::string{}) != "adaptive") {
+      return 65;
     }
   }
 
