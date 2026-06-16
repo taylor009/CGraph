@@ -206,6 +206,20 @@ of blind grep/read. It exposes eight tools:
 | `graph_status` | Daemon, graph, and enrichment status |
 | `graph_shutdown` | Stop the daemon |
 
+`graph_context` has two gather modes. The default (`gather: "fixed"`) packs the whole k-hop
+neighborhood. With a task query in hand, `gather: "adaptive"` keeps the full 2-hop core but expands
+the third hop only along query-relevant nodes — on the retrieval eval it lifted grade-2 recall
+**+0.057** for **+13%** candidate tokens, versus the **+96%** a full 3-hop gather costs. It needs a
+`query`/`q` (the relevance gate is a no-op without one):
+
+```jsonc
+// "load the code I need to change payment validation, ~5k tokens"
+graph_context { "id": "PaymentValidator", "q": "payment validation", "gather": "adaptive", "budget": 5000 }
+// response carries gather:"adaptive", packing:"knapsack", and a reach summary:
+//   "reach": { "candidates": 36, "expanded_past_core": 9, "gated_at_core": 14 }
+// expanded_past_core == 0 means the gate found nothing relevant past 2 hops (it collapsed to the core).
+```
+
 The server resolves the project root from `--root`, then `CLAUDE_PROJECT_DIR`,
 then the working directory. It finds the `graphd` daemon binary on its own: an
 explicit `--daemon <path-to-graphd>` wins, then `CGRAPH_DAEMON_PATH`, then a

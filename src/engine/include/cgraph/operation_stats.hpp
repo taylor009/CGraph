@@ -135,15 +135,30 @@ struct DaemonOpStats {
   // on the pinned layout; the ledger reads these directly at flush.
   std::array<std::array<std::size_t, kHistBucketCount>, kDaemonOpCount> latency_hist{};
   std::size_t query_zero_hits = 0;
+  // Context-op usefulness + mode counters, persisted alongside query_zero_hits so
+  // the durable ledger can report adaptive adoption and the context zero-result
+  // rate (the data a default-flip decision consumes). adaptive_context counts
+  // context calls served with gather="adaptive"; context_zero_hits counts context
+  // calls whose focal node did not resolve.
+  std::size_t context_zero_hits = 0;
+  std::size_t adaptive_context = 0;
   RollingWindow recent;
 
-  void record(DaemonOp op, double latency_ms, bool zero_hit) {
+  void record(DaemonOp op, double latency_ms, bool zero_hit, bool adaptive_context_call = false) {
     const auto idx = static_cast<std::size_t>(op);
     count[idx] += 1;
     total_ms[idx] += latency_ms;
     latency_hist[idx][latency_bucket(latency_ms)] += 1;
     if (op == DaemonOp::Query && zero_hit) {
       query_zero_hits += 1;
+    }
+    if (op == DaemonOp::Context) {
+      if (zero_hit) {
+        context_zero_hits += 1;
+      }
+      if (adaptive_context_call) {
+        adaptive_context += 1;
+      }
     }
     recent.record(RecentOp{op, latency_ms, zero_hit});
   }

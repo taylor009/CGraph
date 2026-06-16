@@ -77,8 +77,13 @@ namespace {
       tool_schema(
           "graph_context",
           "Token-budgeted context bundle for a symbol: the focal node plus its most relevant "
-          "neighbors with source snippets, greedily packed to fit a token budget. The fastest way "
-          "to load just enough code to edit or review a symbol.",
+          "neighbors with source snippets, packed to fit a token budget. The fastest way to load "
+          "just enough code to edit or review a symbol. Two gather modes: the default (fixed) pulls "
+          "the whole k-hop neighborhood; adaptive keeps the 2-hop core but expands the third hop "
+          "only along query-relevant nodes, reaching more of what you asked about at a fraction of "
+          "the full 3-hop token cost. Use adaptive when you have a query/q describing the task -- "
+          "it is a no-op without one. The response reports which gather/packing mode ran, and for "
+          "adaptive a reach summary (candidates, expanded_past_core, gated_at_core).",
           {{"id", string_param("node id or exact symbol name to focus on")},
            {"query", string_param("free-text fallback when the id is unknown; the best match becomes the focus")},
            {"budget", integer_param("token budget for the bundle (default 6000)")},

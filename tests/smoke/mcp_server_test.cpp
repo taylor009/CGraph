@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cmath>
 #include <string>
 
 int main() {
@@ -22,6 +23,18 @@ int main() {
       nlohmann::json{{"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/list"}, {"params", nlohmann::json::object()}},
       forwarder);
   if (listed["result"]["tools"].empty() || listed["result"]["tools"][0]["name"] != "graph_query") {
+    return 1;
+  }
+
+  // The graph_context tool advertises the adaptive gather mode so an agent can find it.
+  bool context_doc_mentions_adaptive = false;
+  for (const auto& tool : listed["result"]["tools"]) {
+    if (tool.value("name", std::string{}) == "graph_context") {
+      context_doc_mentions_adaptive =
+          tool.value("description", std::string{}).find("adaptive") != std::string::npos;
+    }
+  }
+  if (!context_doc_mentions_adaptive) {
     return 1;
   }
 
@@ -50,6 +63,23 @@ int main() {
       forwarder);
   if (explained.contains("error") || forwarded["op"] != "explain" || forwarded["params"]["id"] != "a" ||
       forwarded["params"]["direction"] != "in" || forwarded["params"]["limit"] != 3) {
+    return 1;
+  }
+
+  // graph_context forwards the adaptive gather params verbatim to the context op,
+  // so an agent can actually reach the adaptive mode through MCP.
+  const auto ctx_called = cgraph::handle_mcp_request(
+      nlohmann::json{
+          {"jsonrpc", "2.0"},
+          {"id", 6},
+          {"method", "tools/call"},
+          {"params",
+           {{"name", "graph_context"},
+            {"arguments", {{"id", "a"}, {"q", "alpha"}, {"gather", "adaptive"}, {"gather_theta", 0.1}}}}}},
+      forwarder);
+  if (ctx_called.contains("error") || forwarded["op"] != "context" ||
+      forwarded["params"]["gather"] != "adaptive" ||
+      std::fabs(forwarded["params"]["gather_theta"].get<double>() - 0.1) > 1e-9) {
     return 1;
   }
 

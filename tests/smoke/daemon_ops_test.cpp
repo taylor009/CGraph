@@ -224,6 +224,14 @@ int main() {
       ctx["focus"].value("snippet", std::string{}).rfind("class Alpha {", 0) != 0) {
     return 1;  // focal node leads, carrying its source
   }
+  // The default (greedy/fixed) response self-describes its mode, and carries no
+  // adaptive reach summary.
+  if (ctx.value("gather", std::string{}) != "fixed" || ctx.value("packing", std::string{}) != "greedy") {
+    return 1;
+  }
+  if (ctx.contains("reach")) {
+    return 1;  // reach is adaptive-only
+  }
   if (ctx.value("tokens_used", 0U) == 0U || ctx.value("tokens_used", 0U) > 5000U) {
     return 1;  // packed something, and stayed within budget
   }
@@ -365,6 +373,31 @@ int main() {
     }
   }
 
+  // --- context zero-hit + adaptive usage are observable in status ops ---
+  {
+    cgraph::DaemonState s;
+    cgraph::GraphSnapshot g;
+    g.build_state = cgraph::BuildState::DeterministicReady;
+    g.nodes.push_back(cgraph::Node{.id = "k", .label = "Kettle", .kind = "class"});
+    cgraph::publish_graph_snapshot(s, std::move(g));
+
+    // Resolved focus -> not a zero hit.
+    cgraph::handle_daemon_request(s, cgraph::make_request("context", {{"id", "k"}, {"budget", 5000}}));
+    // Unresolvable focus -> zero hit (the id matched nothing).
+    cgraph::handle_daemon_request(s, cgraph::make_request("context", {{"id", "nope"}, {"budget", 5000}}));
+    // Adaptive call -> counted distinctly from fixed.
+    cgraph::handle_daemon_request(
+        s, cgraph::make_request("context", {{"id", "k"}, {"q", "kettle"}, {"gather", "adaptive"}, {"budget", 5000}}));
+
+    const auto ops = cgraph::handle_daemon_request(s, cgraph::make_request("status"))["result"]["ops"];
+    if (ops.value("context_zero_hits", 0) != 1) {
+      return 36;  // exactly the unresolved-focus call is a context zero hit
+    }
+    if (ops.value("context_adaptive_count", 0) != 1) {
+      return 37;  // exactly the gather=adaptive call is counted
+    }
+  }
+
   // --- adaptive relevance-gated gather: the 3rd hop is taken only from a query-
   //     relevant depth-2 node; the 2-hop core is always preserved ---
   {
@@ -406,6 +439,9 @@ int main() {
     if (fixed["result"].value("gather", std::string{}) != "fixed") {
       return 61;
     }
+    if (fixed["result"].contains("reach")) {
+      return 66;  // reach summary is adaptive-only
+    }
 
     // Adaptive keeps the 2-hop core (rel, irr) but expands the 3rd hop ONLY from the
     // query-relevant depth-2 node -> d3a present (via PaymentValidator), d3b absent.
@@ -425,6 +461,36 @@ int main() {
     }
     if (ares.value("gather", std::string{}) != "adaptive") {
       return 65;
+    }
+    // Reach summary: the gate admitted the relevant third hop (d3a, depth 3) and
+    // rejected the irrelevant depth-2 frontier node (irr).
+    const auto& reach = ares["reach"];
+    if (reach.value("expanded_past_core", 0) < 1) {
+      return 67;  // relevant third hop was reached
+    }
+    if (reach.value("gated_at_core", 0) < 1) {
+      return 68;  // an irrelevant frontier node was gated
+    }
+    if (reach.value("candidates", 0) < 1) {
+      return 69;
+    }
+
+    // A query that matches no depth-2 frontier node collapses adaptive to the
+    // 2-hop core: nothing expands past the core, but the core is still gathered.
+    const auto none = cgraph::handle_daemon_request(
+        s, cgraph::make_request(
+               "context",
+               {{"id", "F"}, {"q", "zzznomatch"}, {"gather", "adaptive"}, {"gather_theta", 0.5}, {"budget", 100000}}));
+    const auto& nres = none["result"];
+    if (nres["reach"].value("expanded_past_core", -1) != 0) {
+      return 70;  // gate found nothing relevant past 2 hops -> no expansion
+    }
+    const auto none_ids = ids_of(nres);
+    if (none_ids.count("rel") == 0 || none_ids.count("irr") == 0) {
+      return 71;  // 2-hop core preserved even when nothing is relevant
+    }
+    if (none_ids.count("d3a") != 0 || none_ids.count("d3b") != 0) {
+      return 72;  // no third hop taken
     }
   }
 

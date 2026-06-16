@@ -592,6 +592,7 @@ struct Snippet {
   }
   if (focal == nullptr) {
     return {{"focus", nullptr}, {"budget", budget}, {"tokens_used", 0},
+            {"packing", use_knapsack ? "knapsack" : "greedy"}, {"gather", adaptive ? "adaptive" : "fixed"},
             {"included", nlohmann::json::array()}, {"omitted", 0},
             {"suggestions", suggest_similar(graph, id.empty() ? needle : id)}};
   }
@@ -614,6 +615,10 @@ struct Snippet {
   std::queue<std::string> frontier;
   reached[focal->id] = {0, {}};
   frontier.push(focal->id);
+  // Adaptive reach accounting: how many frontier nodes the relevance gate rejected
+  // past the 2-hop core. Reported on the response so callers/telemetry can see
+  // whether the gate actually narrowed the third hop.
+  int gated_at_core = 0;
   while (!frontier.empty()) {
     const auto current = frontier.front();
     frontier.pop();
@@ -627,6 +632,7 @@ struct Snippet {
       const auto node_it = by_id.find(current);
       if (node_it == by_id.end() ||
           query_term_overlap(query_terms, node_it->second->label) < gather_theta) {
+        ++gated_at_core;
         continue;
       }
     }
@@ -644,12 +650,16 @@ struct Snippet {
   }
 
   std::vector<const Node*> candidates;
+  int expanded_past_core = 0;  // candidates reached beyond the 2-hop core (depth >= 3)
   for (const auto& [node_id, info] : reached) {
     if (node_id == focal->id) {
       continue;
     }
     if (const auto it = by_id.find(node_id); it != by_id.end()) {
       candidates.push_back(it->second);
+      if (info.depth >= 3) {
+        ++expanded_past_core;
+      }
     }
   }
   std::ranges::sort(candidates, [&](const Node* lhs, const Node* rhs) {
@@ -753,6 +763,14 @@ struct Snippet {
     if (omitted > 0) {
       result["truncated"] = true;
     }
+    // Adaptive reach summary: did the relevance gate actually expand the third hop,
+    // and how much did it prune? expanded_past_core == 0 is the honest "collapsed
+    // to the 2-hop core" signal. Present only for adaptive gather.
+    if (adaptive) {
+      result["reach"] = {{"candidates", candidates.size()},
+                         {"expanded_past_core", expanded_past_core},
+                         {"gated_at_core", gated_at_core}};
+    }
     return result;
   }
 
@@ -796,6 +814,8 @@ struct Snippet {
       {"focus", std::move(focus)},
       {"budget", budget},
       {"tokens_used", used},
+      {"packing", "greedy"},
+      {"gather", "fixed"},
       {"included", std::move(included)},
       {"omitted", omitted}};
   if (omitted > 0 || used > budget) {
@@ -1093,9 +1113,15 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
       case DaemonOp::Impact:
         response = ok_response(annotate_build_state(impact_radius(*graph, params), *graph));
         break;
-      case DaemonOp::Context:
-        response = ok_response(annotate_build_state(pack_context(*graph, params), *graph));
+      case DaemonOp::Context: {
+        auto result = pack_context(*graph, params);
+        // Zero-hit for context = the focal node did not resolve (the id/query
+        // matched nothing). A resolved focus is useful context even if a tight
+        // budget left no neighbors room, so focal-only is NOT a zero hit.
+        zero_hit = result.value("focus", nlohmann::json()).is_null();
+        response = ok_response(annotate_build_state(std::move(result), *graph));
         break;
+      }
       case DaemonOp::Update:
         response = state.update_handler ? ok_response(state.update_handler(params))
                                         : ok_response({{"accepted", true}});
@@ -1111,7 +1137,11 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
         break;  // unreachable: daemon_op_from_string never yields Count
     }
   }
-  state.op_stats.record(*known_op, latency_ms, zero_hit);
+  // A context call served with gather="adaptive" is counted distinctly so the
+  // durable ledger can report adaptive adoption (pre-flip telemetry).
+  const bool adaptive_context_call =
+      *known_op == DaemonOp::Context && params.value("gather", std::string{}) == "adaptive";
+  state.op_stats.record(*known_op, latency_ms, zero_hit, adaptive_context_call);
   return response;
 }
 

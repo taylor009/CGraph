@@ -157,6 +157,8 @@ nlohmann::json op_stats_json(const DaemonOpStats& stats) {
       {"query_count", query_count},
       {"query_zero_hits", stats.query_zero_hits},
       {"query_zero_hit_rate", query_zero_hit_rate(query_count, stats.query_zero_hits)},
+      {"context_adaptive_count", stats.adaptive_context},
+      {"context_zero_hits", stats.context_zero_hits},
   };
 }
 
@@ -222,6 +224,8 @@ nlohmann::json op_stats_ledger_line(const DaemonOpStats& stats,
       {"shutdown", format_iso8601_utc(shutdown)},
       {"uptime_seconds", std::chrono::duration<double>(shutdown - boot).count()},
       {"query_zero_hits", stats.query_zero_hits},
+      {"context_zero_hits", stats.context_zero_hits},
+      {"adaptive_context", stats.adaptive_context},
       {"ops", std::move(ops)},
   };
 }
@@ -264,6 +268,8 @@ nlohmann::json aggregate_op_stats_ledger(const std::vector<nlohmann::json>& line
   std::array<std::array<std::size_t, kHistBucketCount>, kDaemonOpCount> merged_hist{};
   std::size_t lifetimes = 0;
   std::size_t query_zero_hits = 0;
+  std::size_t context_zero_hits = 0;
+  std::size_t adaptive_context = 0;
   bool mixed = false;
 
   for (const auto& line : lines) {
@@ -280,6 +286,10 @@ nlohmann::json aggregate_op_stats_ledger(const std::vector<nlohmann::json>& line
       mixed = true;
     }
     query_zero_hits += line.value("query_zero_hits", static_cast<std::size_t>(0));
+    // Additive fields; absent in pre-existing ledger lines, read as 0 so older
+    // ledgers still roll up without migration.
+    context_zero_hits += line.value("context_zero_hits", static_cast<std::size_t>(0));
+    adaptive_context += line.value("adaptive_context", static_cast<std::size_t>(0));
     const auto ops = line.value("ops", nlohmann::json::object());
     for (const auto op : kSubstantiveOps) {
       const auto* name = daemon_op_name(op);
@@ -309,6 +319,13 @@ nlohmann::json aggregate_op_stats_ledger(const std::vector<nlohmann::json>& line
         {"p90_ms_approx", histogram_percentile(merged_hist[idx], 0.9)},
     };
   }
+  // Surface adaptive adoption and the context zero-result rate on the context op,
+  // beside its summed count -- the telemetry a default-flip decision reads.
+  const std::size_t context_count = sum_count[static_cast<std::size_t>(DaemonOp::Context)];
+  ops_out["context"]["adaptive_count"] = adaptive_context;
+  ops_out["context"]["zero_hits"] = context_zero_hits;
+  ops_out["context"]["zero_hit_rate"] = query_zero_hit_rate(context_count, context_zero_hits);
+
   const std::size_t query_count = sum_count[static_cast<std::size_t>(DaemonOp::Query)];
   return {
       {"since", format_iso8601_utc(since)},

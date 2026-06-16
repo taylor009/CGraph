@@ -280,5 +280,42 @@ int main() {
     std::filesystem::remove_all(dir);
   }
 
+  // --- context adaptive + zero-hit counters: record, persist, roll up, back-compat ---
+  {
+    DaemonOpStats s;
+    s.record(DaemonOp::Context, 3.0, /*zero_hit=*/false, /*adaptive_context_call=*/true);
+    s.record(DaemonOp::Context, 3.0, /*zero_hit=*/false, /*adaptive_context_call=*/true);
+    s.record(DaemonOp::Context, 3.0, /*zero_hit=*/false, /*adaptive_context_call=*/false);  // fixed
+    s.record(DaemonOp::Context, 3.0, /*zero_hit=*/true, /*adaptive_context_call=*/false);    // unresolved focus
+    if (s.adaptive_context != 2 || s.context_zero_hits != 1) {
+      return 43;  // counters routed only for the context op
+    }
+
+    const auto t = parse_iso8601_utc("2026-06-15T13:00:00Z");
+    const auto line = op_stats_ledger_line(s, *t, *t);
+    if (line["adaptive_context"] != 2 || line["context_zero_hits"] != 1) {
+      return 44;  // persisted on the ledger line
+    }
+
+    const auto since = parse_iso8601_utc("2026-06-15T00:00:00Z");
+    const auto roll = aggregate_op_stats_ledger({line}, *since);
+    const auto& ctx = roll["ops"]["context"];
+    if (ctx["adaptive_count"] != 2 || ctx["zero_hits"] != 1) {
+      return 45;  // surfaced on the context op in the rollup
+    }
+    if (ctx["count"] != 4) {
+      return 46;  // adaptive count is independent of the total context count
+    }
+
+    // A line written before these fields existed rolls up as zero, no error.
+    auto legacy = op_stats_ledger_line(s, *t, *t);
+    legacy.erase("adaptive_context");
+    legacy.erase("context_zero_hits");
+    const auto roll2 = aggregate_op_stats_ledger({legacy}, *since)["ops"]["context"];
+    if (roll2["adaptive_count"] != 0 || roll2["zero_hits"] != 0) {
+      return 47;
+    }
+  }
+
   return 0;
 }
