@@ -159,6 +159,7 @@ nlohmann::json op_stats_json(const DaemonOpStats& stats) {
       {"query_zero_hit_rate", query_zero_hit_rate(query_count, stats.query_zero_hits)},
       {"context_adaptive_count", stats.adaptive_context},
       {"context_zero_hits", stats.context_zero_hits},
+      {"recall_zero_hits", stats.recall_zero_hits},
   };
 }
 
@@ -167,8 +168,9 @@ nlohmann::json op_stats_json(const DaemonOpStats& stats) {
 namespace {
 
 // The substantive ops the ledger records and the rollup headlines.
-constexpr std::array<DaemonOp, 5> kSubstantiveOps = {
-    DaemonOp::Query, DaemonOp::Path, DaemonOp::Explain, DaemonOp::Impact, DaemonOp::Context};
+constexpr std::array<DaemonOp, 7> kSubstantiveOps = {
+    DaemonOp::Query,   DaemonOp::Path,     DaemonOp::Explain, DaemonOp::Impact,
+    DaemonOp::Context, DaemonOp::Remember, DaemonOp::Recall};
 
 }  // namespace
 
@@ -226,6 +228,7 @@ nlohmann::json op_stats_ledger_line(const DaemonOpStats& stats,
       {"query_zero_hits", stats.query_zero_hits},
       {"context_zero_hits", stats.context_zero_hits},
       {"adaptive_context", stats.adaptive_context},
+      {"recall_zero_hits", stats.recall_zero_hits},
       {"ops", std::move(ops)},
   };
 }
@@ -270,6 +273,7 @@ nlohmann::json aggregate_op_stats_ledger(const std::vector<nlohmann::json>& line
   std::size_t query_zero_hits = 0;
   std::size_t context_zero_hits = 0;
   std::size_t adaptive_context = 0;
+  std::size_t recall_zero_hits = 0;
   bool mixed = false;
 
   for (const auto& line : lines) {
@@ -290,6 +294,7 @@ nlohmann::json aggregate_op_stats_ledger(const std::vector<nlohmann::json>& line
     // ledgers still roll up without migration.
     context_zero_hits += line.value("context_zero_hits", static_cast<std::size_t>(0));
     adaptive_context += line.value("adaptive_context", static_cast<std::size_t>(0));
+    recall_zero_hits += line.value("recall_zero_hits", static_cast<std::size_t>(0));
     const auto ops = line.value("ops", nlohmann::json::object());
     for (const auto op : kSubstantiveOps) {
       const auto* name = daemon_op_name(op);
@@ -325,6 +330,12 @@ nlohmann::json aggregate_op_stats_ledger(const std::vector<nlohmann::json>& line
   ops_out["context"]["adaptive_count"] = adaptive_context;
   ops_out["context"]["zero_hits"] = context_zero_hits;
   ops_out["context"]["zero_hit_rate"] = query_zero_hit_rate(context_count, context_zero_hits);
+
+  // Recall (session memory) miss rate, beside its summed count -- the durable view
+  // of how often recall came back empty across lifetimes.
+  const std::size_t recall_count = sum_count[static_cast<std::size_t>(DaemonOp::Recall)];
+  ops_out["recall"]["zero_hits"] = recall_zero_hits;
+  ops_out["recall"]["zero_hit_rate"] = query_zero_hit_rate(recall_count, recall_zero_hits);
 
   const std::size_t query_count = sum_count[static_cast<std::size_t>(DaemonOp::Query)];
   return {

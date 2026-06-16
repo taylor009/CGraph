@@ -6,6 +6,7 @@
 #include "cgraph/semantic_connectivity.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -1058,6 +1059,39 @@ struct Snippet {
         static_cast<double>(state.last_files_cache_hit) * state.last_extract_mean_ms;
   }
 
+  // Session-memory inventory: checkpoints in the live snapshot, sidecars on disk,
+  // recall volume + miss count, recency, and the last re-overlay size. Lets an
+  // operator see memory usage now that it is durable.
+  std::size_t checkpoint_count = 0;
+  for (const auto& node : graph.nodes) {
+    if (is_memory_node_id(node.id)) {
+      ++checkpoint_count;
+    }
+  }
+  std::size_t sidecar_count = 0;
+  if (!state.memory_dir.empty()) {
+    std::error_code ec;
+    if (std::filesystem::exists(state.memory_dir, ec)) {
+      for (const auto& entry : std::filesystem::directory_iterator(state.memory_dir, ec)) {
+        if (ec) {
+          break;
+        }
+        if (entry.path().extension() == ".json") {
+          ++sidecar_count;
+        }
+      }
+    }
+  }
+  payload["memory"] = {
+      {"checkpoint_count", checkpoint_count},
+      {"sidecar_count", sidecar_count},
+      {"recall_count", state.op_stats.count[static_cast<std::size_t>(DaemonOp::Recall)]},
+      {"recall_zero_hits", state.op_stats.recall_zero_hits},
+      {"last_remember_at", state.last_remember_at},
+      {"last_recall_at", state.last_recall_at},
+      {"last_overlay_count", state.last_memory_overlay_count},
+  };
+
   // Semantic connectivity: how well the host-authored layer connects to code.
   // Computed from the current snapshot so it reflects live enrichment.
   const auto connectivity = compute_semantic_connectivity(graph);
@@ -1138,11 +1172,20 @@ constexpr std::size_t kMaxCheckpointBodyChars = 16384;
     }
   }
 
-  // Wall-clock millis stamp the id, created_at, and recency ordering (a write
+  // Wall-clock nanos stamp the id, created_at, and recency ordering (a write
   // boundary, like the ledger flush — the running substrate stays monotonic).
+  // The stamp is forced strictly increasing within the process so two checkpoints
+  // in the same clock tick get distinct ids; an identical id would otherwise be
+  // silently dropped by merge_fragment's first-occurrence-wins dedup.
   const auto now = std::chrono::system_clock::now();
-  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-  const auto ts = std::to_string(ms);
+  const auto clock_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+  static std::atomic<long long> last_stamp{0};
+  long long expected = last_stamp.load(std::memory_order_relaxed);
+  long long stamp = 0;
+  do {
+    stamp = std::max<long long>(clock_ns, expected + 1);
+  } while (!last_stamp.compare_exchange_weak(expected, stamp, std::memory_order_relaxed));
+  const auto ts = std::to_string(stamp);
   const auto id = "memory:checkpoint:" + ts;
   const auto filename = ts + "-" + slugify(title) + ".md";
 
@@ -1212,6 +1255,7 @@ constexpr std::size_t kMaxCheckpointBodyChars = 16384;
   }
 
   mutate_graph_snapshot(state, [&](GraphSnapshot& current) { merge_fragment(current, fragment); });
+  state.last_remember_at = ts;  // observability: recency of the last checkpoint write
 
   return ok_response({
       {"id", id},
@@ -1384,6 +1428,12 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
       case DaemonOp::Recall: {
         auto result = recall_checkpoints(*graph, params);
         zero_hit = result.value("total", std::size_t{0}) == 0;
+        // Recency for the status memory block: wall clock read once at this op
+        // boundary (the monotonic latency substrate is untouched).
+        state.last_recall_at = std::to_string(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
         response = ok_response(annotate_build_state(std::move(result), *graph));
         break;
       }

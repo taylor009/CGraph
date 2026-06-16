@@ -742,6 +742,49 @@ int main() {
     fs::remove_all(memdir);
   }
 
+  // --- session-memory observability: status reports the memory inventory, and
+  //     recall zero-hits are counted without touching query/context counters ---
+  {
+    const auto memdir = fs::temp_directory_path() / "cgraph-memory-obs-test";
+    fs::remove_all(memdir);
+    cgraph::DaemonState s;
+    s.memory_dir = memdir;
+    cgraph::GraphSnapshot g;
+    g.build_state = cgraph::BuildState::DeterministicReady;
+    g.nodes.push_back(cgraph::Node{.id = "fn:a", .label = "alpha", .kind = "function"});
+    cgraph::publish_graph_snapshot(s, std::move(g));
+
+    cgraph::handle_daemon_request(s, cgraph::make_request("remember", {{"title", "one"}, {"body", "b"}}));
+    cgraph::handle_daemon_request(s, cgraph::make_request("recall", {}));                  // hit (1 checkpoint)
+    cgraph::handle_daemon_request(s, cgraph::make_request("recall", {{"query", "zzz"}}));  // miss
+
+    const auto st = cgraph::handle_daemon_request(s, cgraph::make_request("status"))["result"];
+    const auto& mem = st["memory"];
+    if (mem.value("checkpoint_count", 0) != 1 || mem.value("sidecar_count", 0) != 1) {
+      return 110;
+    }
+    if (mem.value("recall_count", 0) != 2 || mem.value("recall_zero_hits", 0) != 1) {
+      return 111;
+    }
+    if (mem.value("last_remember_at", std::string{}).empty() ||
+        mem.value("last_recall_at", std::string{}).empty()) {
+      return 112;
+    }
+    // recall zero-hits do not bleed into query/context counters.
+    const auto& ops = st["ops"];
+    if (ops.value("query_zero_hits", 1) != 0 || ops.value("context_zero_hits", 1) != 0 ||
+        ops.value("recall_zero_hits", 0) != 1) {
+      return 113;
+    }
+    // A second checkpoint bumps the inventory.
+    cgraph::handle_daemon_request(s, cgraph::make_request("remember", {{"title", "two"}, {"body", "b2"}}));
+    const auto mem2 = cgraph::handle_daemon_request(s, cgraph::make_request("status"))["result"]["memory"];
+    if (mem2.value("checkpoint_count", 0) != 2) {
+      return 114;
+    }
+    fs::remove_all(memdir);
+  }
+
   // --- typed explain: a relation filter narrows neighbors to one edge type and
   //     composes with direction; an absent relation returns the full set ---
   {

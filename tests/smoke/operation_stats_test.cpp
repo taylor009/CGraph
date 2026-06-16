@@ -317,5 +317,45 @@ int main() {
     }
   }
 
+  // --- session-memory: remember/recall + recall_zero_hits in the durable ledger,
+  //     additive and backward compatible (no schema bump, old lines parse) ---
+  {
+    DaemonOpStats s;
+    s.record(DaemonOp::Remember, 2.0, /*zero_hit=*/false);
+    s.record(DaemonOp::Recall, 1.0, /*zero_hit=*/false);  // hit
+    s.record(DaemonOp::Recall, 1.0, /*zero_hit=*/true);   // miss
+    if (s.recall_zero_hits != 1) {
+      return 48;  // routed only for the recall op
+    }
+
+    const auto t = parse_iso8601_utc("2026-06-16T13:00:00Z");
+    const auto line = op_stats_ledger_line(s, *t, *t);
+    // schema unchanged; remember/recall now carried in the per-op object + a
+    // top-level recall_zero_hits.
+    if (line["schema_version"] != kLedgerSchemaVersion || line["recall_zero_hits"] != 1 ||
+        line["ops"]["remember"]["count"] != 1 || line["ops"]["recall"]["count"] != 2) {
+      return 49;
+    }
+
+    const auto since = parse_iso8601_utc("2026-06-16T00:00:00Z");
+    const auto roll = aggregate_op_stats_ledger({line}, *since);
+    if (roll["ops"]["recall"]["count"] != 2 || roll["ops"]["recall"]["zero_hits"] != 1 ||
+        roll["ops"]["remember"]["count"] != 1) {
+      return 50;  // summed + surfaced in the rollup
+    }
+
+    // A pre-change line lacking remember/recall op entries and recall_zero_hits
+    // still parses and rolls up, contributing zero (no schema bump means merge OK).
+    auto legacy = op_stats_ledger_line(s, *t, *t);
+    legacy.erase("recall_zero_hits");
+    legacy["ops"].erase("remember");
+    legacy["ops"].erase("recall");
+    const auto roll2 = aggregate_op_stats_ledger({legacy}, *since);
+    if (roll2["mixed_schema_versions"] != false || roll2["ops"]["recall"]["zero_hits"] != 0 ||
+        roll2["ops"]["recall"]["count"] != 0 || roll2["ops"]["remember"]["count"] != 0) {
+      return 51;
+    }
+  }
+
   return 0;
 }

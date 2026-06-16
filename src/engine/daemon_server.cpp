@@ -290,7 +290,9 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   // is first-occurrence-wins, so re-applying an already-present checkpoint is a no-op.
   const auto ingest_all_memory = [&]() {
     std::error_code ec;
+    std::size_t applied = 0;
     if (!std::filesystem::exists(memory_dir, ec)) {
+      state.last_memory_overlay_count = 0;
       return;
     }
     for (const auto& entry : std::filesystem::directory_iterator(memory_dir, ec)) {
@@ -305,7 +307,9 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
         continue;
       }
       mutate_graph_snapshot(state, [&](GraphSnapshot& graph) { merge_fragment(graph, validation.fragment); });
+      ++applied;
     }
+    state.last_memory_overlay_count = applied;  // observability: size of the last re-overlay pass
   };
 
   // The daemon owns the incremental file index: startup and every `update` op

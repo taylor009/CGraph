@@ -60,6 +60,12 @@ struct DaemonState {
   // the running daemon to <project>/cgraph-out/memory). Empty disables the write
   // op (returns an error) so in-process callers without a project dir are safe.
   std::filesystem::path memory_dir;
+  // Session-memory observability: recency of the last remember/recall (ms-epoch
+  // strings, empty when never called) and the number of checkpoints re-applied by
+  // the most recent memory re-overlay. Surfaced in the status `memory` block.
+  std::string last_remember_at;
+  std::string last_recall_at;
+  std::size_t last_memory_overlay_count = 0;
 };
 
 // Marks an enrichment ingest as in-flight for the lifetime of the scope:

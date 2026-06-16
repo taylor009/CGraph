@@ -144,6 +144,9 @@ struct DaemonOpStats {
   // calls whose focal node did not resolve.
   std::size_t context_zero_hits = 0;
   std::size_t adaptive_context = 0;
+  // Recall (session memory) usefulness: recalls that returned no checkpoints. Kept
+  // beside context_zero_hits so the durable ledger can report the recall miss rate.
+  std::size_t recall_zero_hits = 0;
   RollingWindow recent;
 
   void record(DaemonOp op, double latency_ms, bool zero_hit, bool adaptive_context_call = false) {
@@ -162,17 +165,23 @@ struct DaemonOpStats {
         adaptive_context += 1;
       }
     }
+    if (op == DaemonOp::Recall && zero_hit) {
+      recall_zero_hits += 1;
+    }
     recent.record(RecentOp{op, latency_ms, zero_hit});
   }
 
-  // True when >=1 substantive op (query/path/explain/impact/context) was served.
-  // Gates the durable flush so idle status-only daemon spawns write no ledger line.
+  // True when >=1 substantive op (query/path/explain/impact/context/remember/recall)
+  // was served. Gates the durable flush so idle status-only spawns write no ledger
+  // line; memory ops count, so a memory-only lifetime is still recorded.
   [[nodiscard]] bool has_substantive_ops() const {
     return count[static_cast<std::size_t>(DaemonOp::Query)] +
                count[static_cast<std::size_t>(DaemonOp::Path)] +
                count[static_cast<std::size_t>(DaemonOp::Explain)] +
                count[static_cast<std::size_t>(DaemonOp::Impact)] +
-               count[static_cast<std::size_t>(DaemonOp::Context)] >
+               count[static_cast<std::size_t>(DaemonOp::Context)] +
+               count[static_cast<std::size_t>(DaemonOp::Remember)] +
+               count[static_cast<std::size_t>(DaemonOp::Recall)] >
            0;
   }
 };
