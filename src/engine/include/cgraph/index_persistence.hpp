@@ -21,9 +21,12 @@ struct IndexManifest {
   std::vector<FileCacheEntry> files;
 };
 
-// Content-addressed key over the running executable, so any recompile of the
-// extractor (or anything else) invalidates a persisted cache even when the
-// source tree is byte-identical. Stable across calls within one process.
+// Logic version of the persisted pipeline artifacts. A persisted cache is
+// fast-loadable only when this matches; it is bumped by hand when a parity
+// surface changes (extraction/fragment shape, ID normalization, dedup/merge, or
+// graph.json output). Deliberately a constant rather than a hash of the binary,
+// so re-signing or an unrelated recompile does not invalidate every project's
+// cache. Stable across calls and across binaries built from the same logic.
 [[nodiscard]] std::string index_version_key();
 
 // Atomic write (temp + rename). Returns false if the file could not be written.

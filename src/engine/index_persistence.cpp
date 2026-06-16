@@ -7,40 +7,28 @@
 #include <system_error>
 #include <unordered_map>
 
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#elif defined(__linux__)
-#include <filesystem>
-#endif
-
 namespace cgraph {
 namespace {
 
-constexpr const char* kVersionPrefix = "cgraph-index-v1:";
+// Logic version of the deterministic pipeline's persisted artifacts. A persisted
+// graph.json + manifest may be fast-loaded only when this key matches the one
+// stamped at write time, so it must change whenever a graph built by an older
+// binary would be incompatible with this one. BUMP THE TRAILING NUMBER on any
+// change to a parity surface: extraction/fragment shape, ID normalization
+// (normalize.cpp), the dedup/merge contract, or the graph.json node-link output
+// (export_json.cpp).
+//
+// This is deliberately a constant, NOT a hash of the running executable: keying
+// on binary bytes invalidated every project's fast-load cache on any rebuild or
+// re-sign (e.g. `codesign --force --sign -` after install), forcing a cold
+// multi-minute rebuild on the next query even when extraction was untouched. The
+// golden/parity tests catch an *unintended* output change; bumping this key on an
+// *intended* one is an author/reviewer responsibility, like any on-disk schema
+// version.
+constexpr const char* kIndexVersionKey = "cgraph-index-v1:logic-1";
 
 [[nodiscard]] std::string normalized_key(const std::filesystem::path& path) {
   return path.lexically_normal().generic_string();
-}
-
-// Resolves the absolute path of the running executable so its content hash can
-// key the cache. Empty on platforms/situations where it cannot be determined,
-// which forces a conservative cache miss (the manifest key will never match).
-[[nodiscard]] std::filesystem::path current_executable_path() {
-#if defined(__APPLE__)
-  std::uint32_t size = 0;
-  _NSGetExecutablePath(nullptr, &size);  // first call reports the needed buffer size
-  std::string buffer(size, '\0');
-  if (size > 0 && _NSGetExecutablePath(buffer.data(), &size) == 0) {
-    return std::filesystem::path(buffer.c_str());
-  }
-  return {};
-#elif defined(__linux__)
-  std::error_code error;
-  auto path = std::filesystem::read_symlink("/proc/self/exe", error);
-  return error ? std::filesystem::path{} : path;
-#else
-  return {};
-#endif
 }
 
 [[nodiscard]] std::int64_t mtime_count(const std::filesystem::file_time_type& time) {
@@ -54,10 +42,7 @@ constexpr const char* kVersionPrefix = "cgraph-index-v1:";
 }  // namespace
 
 std::string index_version_key() {
-  const auto exe = current_executable_path();
-  std::string key = kVersionPrefix;
-  key += exe.empty() ? std::string{"unknown-executable"} : sha256_file_hex(exe);
-  return key;
+  return kIndexVersionKey;
 }
 
 bool write_index_manifest(const IndexManifest& manifest, const std::filesystem::path& path) {

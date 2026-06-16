@@ -38,6 +38,16 @@ int main() {
     return 1;
   }
 
+  // Regression guard: the key is a fixed logic version, NOT a hash of the running
+  // binary. A binary-hash key invalidated every project's fast-load cache on any
+  // rebuild or re-sign, forcing a cold rebuild on the next query. The trailing
+  // segment must therefore stay a short literal (bumped by hand on parity-surface
+  // changes) and never a 64-char hex digest. Update this literal when you bump it.
+  if (key != "cgraph-index-v1:logic-1") {
+    fs::remove_all(root);
+    return 1;
+  }
+
   cgraph::IndexManifest manifest;
   manifest.version_key = key;
   manifest.files.push_back(cgraph::read_file_cache_entry(a));
