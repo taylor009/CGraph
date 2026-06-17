@@ -272,6 +272,43 @@ int main() {
     return 1;
   }
 
+  // Lexical focal fallback: a natural-language query that is NOT a substring of any
+  // label still resolves, via query-term overlap. "gamma" overlaps only
+  // "gamma_run" ("d"); the old substring-only match would have returned focus:null.
+  const auto nl_context = cgraph::handle_daemon_request(
+      state, cgraph::make_request("context", {{"q", "compute the gamma value"}, {"budget", 5000}}));
+  if (nl_context["result"]["focus"].is_null() ||
+      nl_context["result"]["focus"].value("id", std::string{}) != "d") {
+    return 1;
+  }
+
+  // Off-topic query (shares no lexical term with any label) stays an honest zero
+  // hit — null focus, not a misleading bundle forced by the fallback.
+  const auto offtopic = cgraph::handle_daemon_request(
+      state, cgraph::make_request("context", {{"q", "xylophone zebra quux"}, {"budget", 5000}}));
+  if (!offtopic["result"]["focus"].is_null()) {
+    return 1;
+  }
+
+  // Multi-seed gather: "alpha gamma" is no label's substring, so the lexical
+  // fallback seeds from the top matches (a/c via "alpha", d via "gamma"). "d" is
+  // disconnected (no edges) and reachable ONLY as its own seed, so its presence in
+  // the bundle proves the gather unions several ego graphs, not just the focal's.
+  const auto multi = cgraph::handle_daemon_request(
+      state, cgraph::make_request("context", {{"q", "alpha gamma"}, {"budget", 50000}}));
+  if (multi["result"]["focus"].is_null()) {
+    return 1;
+  }
+  bool multi_found_d = false;
+  for (const auto& item : multi["result"]["included"]) {
+    if (item.value("id", std::string{}) == "d") {
+      multi_found_d = true;
+    }
+  }
+  if (!multi_found_d) {
+    return 1;
+  }
+
   fs::remove_all(src.parent_path());
 
   const auto update = cgraph::handle_daemon_request(state, cgraph::make_request("update"));

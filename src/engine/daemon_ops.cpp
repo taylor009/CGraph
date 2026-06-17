@@ -224,6 +224,51 @@ struct Snippet {
   return static_cast<double>(hit) / static_cast<double>(query_terms.size());
 }
 
+// Number of lexical focal seeds whose neighborhoods a context gather unions when
+// resolving a free-text query. A single lexical top-1 is the truly-relevant
+// symbol only ~23% of the time (research/focal-resolution/results.md); seeding
+// from several hedges query ambiguity.
+constexpr std::size_t kFocalSeedCount = 5;
+
+// Nodes that share at least one lexical term with the query, ranked by overlap
+// (then centrality, then label). The fallback when literal substring matching
+// (`matching_nodes`) finds nothing, so a natural-language query — which is almost
+// never a substring of a symbol label — still resolves a focal node instead of
+// returning empty. A query that shares no term with any label yields no match, so
+// a genuinely off-topic request stays an honest zero hit.
+[[nodiscard]] std::vector<const Node*> lexical_matches(
+    const GraphSnapshot& graph, const std::unordered_set<std::string>& query_terms) {
+  std::vector<std::pair<double, const Node*>> scored;
+  if (query_terms.empty()) {
+    return {};
+  }
+  for (const auto& node : graph.nodes) {
+    if (is_memory_node_id(node.id)) {
+      continue;  // session-memory checkpoints are not code matches
+    }
+    if (const double overlap = query_term_overlap(query_terms, node.label); overlap > 0.0) {
+      scored.emplace_back(overlap, &node);
+    }
+  }
+  std::ranges::sort(scored, [](const auto& lhs, const auto& rhs) {
+    if (lhs.first != rhs.first) {
+      return lhs.first > rhs.first;  // higher overlap first
+    }
+    const auto lc = node_centrality(*lhs.second);
+    const auto rc = node_centrality(*rhs.second);
+    if (lc != rc) {
+      return lc > rc;  // more central first
+    }
+    return lhs.second->label < rhs.second->label;  // deterministic tiebreak
+  });
+  std::vector<const Node*> out;
+  out.reserve(scored.size());
+  for (const auto& [overlap, node] : scored) {
+    out.push_back(node);
+  }
+  return out;
+}
+
 // Knapsack item weight: token cost of the node's (capped) source slice only --
 // NOT estimate_tokens(json_entry.dump()). Step A (research/2510.00446) showed the
 // JSON-entry overhead (mangled id + absolute path + location keys) flattens the
@@ -401,6 +446,14 @@ struct Snippet {
 [[nodiscard]] nlohmann::json query_graph(const GraphSnapshot& graph, const nlohmann::json& params) {
   const auto needle = params.value("q", params.value("query", std::string{}));
   auto matches = matching_nodes(graph, needle);
+  // Natural-language queries are almost never a substring of a symbol label; fall
+  // back to lexical term overlap so the query op returns relevant symbols instead
+  // of nothing. Lexical results arrive already ranked by overlap, so the
+  // centrality re-sort below is skipped for them.
+  const bool lexical_fallback = matches.empty();
+  if (lexical_fallback) {
+    matches = lexical_matches(graph, lexical_terms(needle));
+  }
 
   // Optional narrowing: `kind` (exact, e.g. "function") and `file` (substring
   // of the source path), both case-insensitive.
@@ -413,14 +466,18 @@ struct Snippet {
 
   // Rank by importance so the most central (most-connected / god) nodes lead —
   // an agent reading the top few results lands on the symbols that matter.
-  std::ranges::sort(matches, [](const Node* lhs, const Node* rhs) {
-    const auto lc = node_centrality(*lhs);
-    const auto rc = node_centrality(*rhs);
-    if (lc != rc) {
-      return lc > rc;
-    }
-    return lhs->label < rhs->label;  // stable, deterministic tiebreak
-  });
+  // Lexical-fallback matches are already ranked by query overlap; re-sorting by
+  // centrality would bury the most relevant matches under high-degree god nodes.
+  if (!lexical_fallback) {
+    std::ranges::sort(matches, [](const Node* lhs, const Node* rhs) {
+      const auto lc = node_centrality(*lhs);
+      const auto rc = node_centrality(*rhs);
+      if (lc != rc) {
+        return lc > rc;
+      }
+      return lhs->label < rhs->label;  // stable, deterministic tiebreak
+    });
+  }
 
   const auto total = matches.size();
   const auto limit = params.value("limit", kDefaultQueryLimit);
@@ -591,11 +648,23 @@ struct Snippet {
   const auto id = params.value("id", std::string{});
   const auto needle = params.value("q", params.value("query", std::string{}));
   const Node* focal = id.empty() ? nullptr : resolve_node(graph, by_id, id);
+  // The gather is seeded from `seeds`. For an exact/substring/id resolution that is
+  // just the focal; a free-text query that resolves only via lexical overlap seeds
+  // from the top-N matches and unions their ego graphs (the dominant recall lever —
+  // a single lexical seed is the right symbol only ~23% of the time).
+  std::vector<const Node*> seeds;
   if (focal == nullptr && !needle.empty()) {
     for (const auto* match : matching_nodes(graph, needle)) {
       if (focal == nullptr || node_centrality(*match) > node_centrality(*focal)) {
         focal = match;
       }
+    }
+    if (focal == nullptr) {
+      seeds = lexical_matches(graph, lexical_terms(needle));
+      if (seeds.size() > kFocalSeedCount) {
+        seeds.resize(kFocalSeedCount);
+      }
+      focal = seeds.empty() ? nullptr : seeds.front();
     }
   }
   if (focal == nullptr) {
@@ -603,6 +672,9 @@ struct Snippet {
             {"packing", use_knapsack ? "knapsack" : "greedy"}, {"gather", adaptive ? "adaptive" : "fixed"},
             {"included", nlohmann::json::array()}, {"omitted", 0},
             {"suggestions", suggest_similar(graph, id.empty() ? needle : id)}};
+  }
+  if (seeds.empty()) {
+    seeds.push_back(focal);  // exact / substring / id resolution stays single-seed
   }
 
   // Query terms for the adaptive gather gate and the knapsack relevance value.
@@ -621,8 +693,13 @@ struct Snippet {
   }
   std::unordered_map<std::string, Reached> reached;
   std::queue<std::string> frontier;
-  reached[focal->id] = {0, {}};
-  frontier.push(focal->id);
+  // Seed the walk from every lexical seed at depth 0 (usually just the focal); a
+  // node first reached from a lower-ranked seed keeps its shallowest depth.
+  for (const auto* seed : seeds) {
+    if (reached.emplace(seed->id, Reached{0, {}}).second) {
+      frontier.push(seed->id);
+    }
+  }
   // Adaptive reach accounting: how many frontier nodes the relevance gate rejected
   // past the 2-hop core. Reported on the response so callers/telemetry can see
   // whether the gate actually narrowed the third hop.
