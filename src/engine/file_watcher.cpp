@@ -75,9 +75,9 @@ namespace {
 
   for (; !error && iterator != end; iterator.increment(error)) {
     const auto& entry = *iterator;
-    const auto name = entry.path().filename().generic_string();
     if (entry.is_directory(error)) {
-      if (is_skipped_directory(name) || matches_simple_gitignore(root, entry.path(), gitignore_patterns)) {
+      if (is_dependency_directory(entry.path()) ||
+          matches_simple_gitignore(root, entry.path(), gitignore_patterns)) {
         iterator.disable_recursion_pending();
       }
       continue;

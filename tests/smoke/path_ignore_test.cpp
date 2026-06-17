@@ -25,11 +25,49 @@ int test_skipped_directory() {
       !cgraph::is_skipped_directory("coverage")) {
     return 1;
   }
-  // A normal source directory must not be skipped.
-  if (cgraph::is_skipped_directory("src") || cgraph::is_skipped_directory("docs")) {
+  // Python ecosystem dependency/tooling trees: a virtualenv or its site-packages
+  // is not project source. `site-packages` catches venv contents regardless of the
+  // venv directory's name.
+  for (const auto* name : {".venv", "venv", "site-packages", "__pycache__", ".tox", ".nox",
+                           ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis", ".eggs"}) {
+    if (!cgraph::is_skipped_directory(name)) {
+      return 1;
+    }
+  }
+  // A normal source directory must not be skipped — including names that merely
+  // contain a skipped token, and bare `env` (a common config dir; oddly-named
+  // venvs are caught structurally by their pyvenv.cfg marker instead).
+  if (cgraph::is_skipped_directory("src") || cgraph::is_skipped_directory("docs") ||
+      cgraph::is_skipped_directory("env") || cgraph::is_skipped_directory("my_env_utils") ||
+      cgraph::is_skipped_directory("environment")) {
     return 1;
   }
   return 0;
+}
+
+// is_dependency_directory adds a structural check on top of the name list: a
+// directory containing a pyvenv.cfg is a virtualenv root and is skipped even when
+// its name is not listed.
+int test_dependency_directory_marker() {
+  const auto root = fs::temp_directory_path() / "cgraph_path_ignore_marker";
+  fs::remove_all(root);
+  fs::create_directories(root);
+
+  // Oddly-named venv: not in the name list, but has the marker -> skipped.
+  write_file(root / "qa-env" / "pyvenv.cfg", "home = /usr/bin\n");
+  // Lookalike: a real source dir with no marker -> not skipped.
+  fs::create_directories(root / "my_env_utils");
+  write_file(root / "my_env_utils" / "helper.py", "def f():\n    return 1\n");
+  // Listed name is skipped structurally too, marker or not.
+  fs::create_directories(root / ".venv");
+
+  int rc = 0;
+  rc |= !cgraph::is_dependency_directory(root / "qa-env");        // marker -> skip
+  rc |= !cgraph::is_dependency_directory(root / ".venv");         // listed name -> skip
+  rc |= cgraph::is_dependency_directory(root / "my_env_utils");   // neither -> keep
+
+  fs::remove_all(root);
+  return rc ? 1 : 0;
 }
 
 // The regression this module exists to prevent: a root .gitignore that ignores a
@@ -96,5 +134,6 @@ int test_empty_gitignore() {
 }  // namespace
 
 int main() {
-  return test_skipped_directory() || test_gitignore_matches_vendored_dir() || test_empty_gitignore();
+  return test_skipped_directory() || test_dependency_directory_marker() ||
+         test_gitignore_matches_vendored_dir() || test_empty_gitignore();
 }

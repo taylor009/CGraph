@@ -15,8 +15,16 @@ namespace cgraph {
 // code scan correctly skips).
 
 // Directories that are always skipped regardless of .gitignore (VCS metadata,
-// editor caches, build output, dependency/vendor trees).
+// editor caches, build output, dependency/vendor trees, including the Python
+// ecosystem: virtualenvs, site-packages, and tool caches).
 [[nodiscard]] bool is_skipped_directory(std::string_view name);
+
+// Whether a directory should be skipped during a project walk: true when its leaf
+// name is in the always-skip set OR it is a virtualenv root (contains a
+// `pyvenv.cfg` marker). The structural check catches venvs whose directory name is
+// not in the list (e.g. `qa-env/`). Callers that have the full path should prefer
+// this over the name-only `is_skipped_directory`.
+[[nodiscard]] bool is_dependency_directory(const std::filesystem::path& dir);
 
 // Parse the root .gitignore into a list of simple patterns. Comments, blank
 // lines, and negations (`!`) are dropped; a trailing `/` is stripped so a

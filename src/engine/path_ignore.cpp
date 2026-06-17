@@ -1,6 +1,7 @@
 #include "cgraph/path_ignore.hpp"
 
 #include <fstream>
+#include <system_error>
 #include <unordered_set>
 
 namespace cgraph {
@@ -25,8 +26,32 @@ bool is_skipped_directory(std::string_view name) {
       "vendor",
       "cgraph-out",
       "graphify-out",
+      // Python ecosystem: virtualenvs, installed packages, and tool caches are
+      // dependencies/generated state, never project source. `site-packages`
+      // catches venv contents regardless of the venv directory's name.
+      ".venv",
+      "venv",
+      "site-packages",
+      "__pycache__",
+      ".tox",
+      ".nox",
+      ".pytest_cache",
+      ".mypy_cache",
+      ".ruff_cache",
+      ".hypothesis",
+      ".eggs",
   };
   return skipped.contains(name);
+}
+
+bool is_dependency_directory(const std::filesystem::path& dir) {
+  if (is_skipped_directory(dir.filename().generic_string())) {
+    return true;
+  }
+  // A virtualenv root carries a pyvenv.cfg marker; skip it even under a
+  // non-standard name. Probed once per directory entered (not per file).
+  std::error_code ec;
+  return std::filesystem::exists(dir / "pyvenv.cfg", ec);
 }
 
 std::vector<std::string> read_root_gitignore(const std::filesystem::path& root) {
