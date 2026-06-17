@@ -55,12 +55,18 @@ int main() {
     return 1;
   }
 
+  // Pathologically deep nesting (far past any real code) would recurse one native
+  // stack frame per level in walk_node and blow the ~512 KB extraction-worker
+  // stack, killing the process with SIGBUS. The depth cap must engage: the file
+  // still yields its shallow nodes (the function), records the ast-depth-cap
+  // warning, and never crashes. The cap is thread-independent, so the result is
+  // identical whether this runs on the 8 MB main thread or a 512 KB worker.
   std::string deep_source = "function deep() { return ";
-  for (int index = 0; index < 512; ++index) {
+  for (int index = 0; index < 4000; ++index) {
     deep_source += "(";
   }
   deep_source += "0";
-  for (int index = 0; index < 512; ++index) {
+  for (int index = 0; index < 4000; ++index) {
     deep_source += ")";
   }
   deep_source += "; }\n";
@@ -70,7 +76,7 @@ int main() {
       .path = deep_path,
       .language = cgraph::DetectedLanguage::JavaScript,
   });
-  if (deep_result.fragment.nodes.empty() || !deep_result.fragment.warnings.empty()) {
+  if (deep_result.fragment.nodes.empty() || !contains_warning(deep_result, "ast-depth-cap")) {
     std::filesystem::remove_all(root);
     return 1;
   }

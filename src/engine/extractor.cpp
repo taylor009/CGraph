@@ -201,6 +201,19 @@ void add_containment_edge(
   });
 }
 
+// Hard cap on AST recursion depth. walk_node descends one native stack frame per
+// tree level. extract_files runs on std::thread workers, which get the default
+// ~512 KB secondary-thread stack on macOS, so a pathologically deep parse blows
+// that stack and the process dies with SIGBUS. Empirically the overflow lands
+// between depth 250 and 500 on a 512 KB stack; the trigger seen in the wild was a
+// machine-generated NumPy C header (__multiarray_api.h) with a single ~thousands-
+// deep expression. Hand- and tool-written code nests well under 100 levels, so
+// this bound sits comfortably above real code yet clear of the overflow. A file
+// that reaches it records a warning instead of silently truncating, so a
+// genuinely deep file surfaces rather than vanishing.
+constexpr std::uint32_t kMaxWalkDepth = 200;
+constexpr std::string_view kDepthCapMarker = "ast-depth-cap";
+
 void walk_node(
     const TSNode& node,
     const LanguageConfig& config,
@@ -210,7 +223,20 @@ void walk_node(
     const std::string& function_scope_id,
     Fragment& fragment,
     std::vector<RawCall>& raw_calls,
-    std::vector<RawRelation>& raw_relations) {
+    std::vector<RawRelation>& raw_relations,
+    std::uint32_t depth) {
+  if (depth >= kMaxWalkDepth) {
+    // Stop descending. Record once per file (warnings are few, scan is cheap) so
+    // a genuinely deep file is visible and never silently dropped.
+    const bool recorded = std::any_of(fragment.warnings.begin(), fragment.warnings.end(),
+                                      [](const std::string& w) { return w.find(kDepthCapMarker) != std::string::npos; });
+    if (!recorded) {
+      fragment.warnings.push_back(std::string(kDepthCapMarker) + ": extraction stopped at depth " +
+                                  std::to_string(kMaxWalkDepth) + " in " + context.source_file +
+                                  " (deeper AST nodes skipped)");
+    }
+    return;
+  }
   const auto symbol = ts_node_symbol(node);
 
   // Two scopes are threaded down the tree. `child_scope` is the structural
@@ -288,7 +314,7 @@ void walk_node(
 
   const auto child_count = ts_node_child_count(node);
   for (std::uint32_t index = 0; index < child_count; ++index) {
-    walk_node(ts_node_child(node, index), config, context, child_scope, child_kind, child_function_scope, fragment, raw_calls, raw_relations);
+    walk_node(ts_node_child(node, index), config, context, child_scope, child_kind, child_function_scope, fragment, raw_calls, raw_relations, depth + 1);
   }
 }
 
@@ -337,7 +363,7 @@ ExtractionResult extract_with_config(
   // The file is the structural root (owns `contains` edges) but not a call
   // scope, so the function-scope seed is empty: top-level calls are dropped
   // until the walk enters a function body.
-  walk_node(ts_tree_root_node(tree.get()), config, context, file_id, "file", /*function_scope_id=*/{}, result.fragment, result.raw_calls, result.raw_relations);
+  walk_node(ts_tree_root_node(tree.get()), config, context, file_id, "file", /*function_scope_id=*/{}, result.fragment, result.raw_calls, result.raw_relations, /*depth=*/0);
   return result;
 }
 
