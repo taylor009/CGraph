@@ -148,6 +148,29 @@ ExtractionResult extract_mcp_config(const ExtractionContext& context) {
   return result;
 }
 
+// File-level SQL indexing: emit exactly one node representing the .sql file so the
+// data layer (Prisma migrations/schema) is discoverable, enrichable, and
+// seam-anchorable. SQL contents are not parsed (symbol-level extraction is a
+// follow-up); no source_location, no symbols, no edges.
+ExtractionResult extract_sql(const ExtractionContext& context) {
+  ExtractionResult result;
+  const auto& source_file = context.source_file;
+  const auto slash = source_file.find_last_of("/\\");
+  const std::string filename =
+      slash == std::string::npos ? source_file : source_file.substr(slash + 1);
+  if (filename.empty()) {
+    return result;
+  }
+  result.fragment.nodes.push_back(Node{
+      .id = make_id(source_file + ":sql_file:" + filename),
+      .label = filename,
+      .source_file = source_file,
+      .kind = "sql_file",
+      .confidence = Confidence::Extracted,
+  });
+  return result;
+}
+
 std::optional<ExtractionResult> extract_non_grammar_language(
     DetectedLanguage language,
     const ExtractionContext& context) {
@@ -161,6 +184,8 @@ std::optional<ExtractionResult> extract_non_grammar_language(
       return extract_apex(context);
     case DetectedLanguage::McpConfig:
       return extract_mcp_config(context);
+    case DetectedLanguage::Sql:
+      return extract_sql(context);
     default:
       return std::nullopt;
   }

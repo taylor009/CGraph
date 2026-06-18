@@ -97,6 +97,9 @@ DetectedLanguage detect_language(const std::filesystem::path& path) {
   if (extension == ".tsx") {
     return DetectedLanguage::Tsx;
   }
+  if (extension == ".sql") {
+    return DetectedLanguage::Sql;
+  }
   if (extension == ".xml") {
     return DetectedLanguage::Xml;
   }

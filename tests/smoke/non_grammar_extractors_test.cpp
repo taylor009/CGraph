@@ -41,5 +41,20 @@ int main() {
     return 1;
   }
 
+  // A .sql file produces exactly one file-level node (kind sql_file), no symbols,
+  // no edges -- the contents are not parsed.
+  const auto sql = cgraph::extract_sql(cgraph::ExtractionContext{
+      .source_file = "prisma/migrations/20201214_baseline/migration.sql",
+      .source = "CREATE TYPE \"Role\" AS ENUM ('USER','ADMIN');\nCREATE TABLE \"Thread\" (id TEXT);",
+  });
+  if (sql.fragment.nodes.size() != 1 || !sql.fragment.edges.empty()) {
+    return 1;
+  }
+  if (sql.fragment.nodes[0].kind != "sql_file" ||
+      sql.fragment.nodes[0].label != "migration.sql" ||
+      sql.fragment.nodes[0].source_file != "prisma/migrations/20201214_baseline/migration.sql") {
+    return 1;
+  }
+
   return 0;
 }

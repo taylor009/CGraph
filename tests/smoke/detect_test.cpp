@@ -41,6 +41,11 @@ int main() {
   if (cgraph::detect_language("tool.py") != DetectedLanguage::Python) {
     return 1;
   }
+  // .sql is a recognized language (file-level), so it is detected as code rather
+  // than left Unknown (which would make it an enrichment-only document).
+  if (cgraph::detect_language("migration.sql") != DetectedLanguage::Sql) {
+    return 1;
+  }
 
   const auto root = std::filesystem::temp_directory_path() / "cgraph_detect_test";
   std::filesystem::remove_all(root);

@@ -24,6 +24,7 @@ enum class DetectedLanguage {
   Python,
   Ruby,
   Scala,
+  Sql,
   TypeScript,
   Tsx,
   Xml,
