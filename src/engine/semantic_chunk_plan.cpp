@@ -51,9 +51,11 @@ namespace {
 
   for (; !error && iterator != end; iterator.increment(error)) {
     const auto& entry = *iterator;
-    const auto name = entry.path().filename().generic_string();
     if (entry.is_directory(error)) {
-      if (is_skipped_directory(name) || is_excluded_dir(entry.path(), excluded_dirs) ||
+      // is_dependency_directory subsumes the name skip-list and adds the
+      // structural markers (pyvenv.cfg, linked git-worktree `.git` file), so the
+      // enrichment planner skips the same trees as detection and the watcher.
+      if (is_dependency_directory(entry.path()) || is_excluded_dir(entry.path(), excluded_dirs) ||
           matches_simple_gitignore(canonical_root, entry.path(), gitignore_patterns)) {
         iterator.disable_recursion_pending();
       }

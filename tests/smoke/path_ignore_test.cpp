@@ -34,12 +34,21 @@ int test_skipped_directory() {
       return 1;
     }
   }
+  // Agent-CLI / spec-tool config dirs are tooling, not project source or docs.
+  for (const auto* name : {".claude", ".codex", ".gemini", ".cursor", ".factory", ".opencode",
+                           ".windsurf", ".aider", ".specify"}) {
+    if (!cgraph::is_skipped_directory(name)) {
+      return 1;
+    }
+  }
   // A normal source directory must not be skipped — including names that merely
-  // contain a skipped token, and bare `env` (a common config dir; oddly-named
-  // venvs are caught structurally by their pyvenv.cfg marker instead).
+  // contain a skipped token, bare `env` (a common config dir; oddly-named venvs
+  // are caught structurally by their pyvenv.cfg marker instead), and the
+  // non-dotted lookalikes of the agent-tooling names (a real `factory/` package).
   if (cgraph::is_skipped_directory("src") || cgraph::is_skipped_directory("docs") ||
       cgraph::is_skipped_directory("env") || cgraph::is_skipped_directory("my_env_utils") ||
-      cgraph::is_skipped_directory("environment")) {
+      cgraph::is_skipped_directory("environment") || cgraph::is_skipped_directory("factory") ||
+      cgraph::is_skipped_directory("claude") || cgraph::is_skipped_directory("specify")) {
     return 1;
   }
   return 0;
@@ -65,6 +74,43 @@ int test_dependency_directory_marker() {
   rc |= !cgraph::is_dependency_directory(root / "qa-env");        // marker -> skip
   rc |= !cgraph::is_dependency_directory(root / ".venv");         // listed name -> skip
   rc |= cgraph::is_dependency_directory(root / "my_env_utils");   // neither -> keep
+
+  fs::remove_all(root);
+  return rc ? 1 : 0;
+}
+
+// A linked git worktree checkout is a full duplicate of the repo; its `.git` is
+// a regular FILE (a `gitdir:` pointer), whereas a real repo root's `.git` is a
+// directory. is_dependency_directory skips the worktree structurally — the
+// checkout dirs are uuid/slug-named under a tool-specific parent (`.anvil`,
+// `.agents`, …), so the name list cannot catch them — while never skipping the
+// project root.
+int test_dependency_directory_worktree() {
+  const auto root = fs::temp_directory_path() / "cgraph_path_ignore_worktree";
+  fs::remove_all(root);
+  fs::create_directories(root);
+
+  // Live linked worktree: `.git` is a regular file with a gitdir pointer -> skip.
+  write_file(root / ".anvil" / "worktrees" / "wt1" / ".git",
+             "gitdir: /repo/.git/worktrees/wt1\n");
+  write_file(root / ".anvil" / "worktrees" / "wt1" / "src" / "a.ts", "export const a = 1;\n");
+  // The `<.tool>/worktrees` convention dir itself -> skip (so stale checkouts
+  // under it, whose `.git` may be pruned, never get walked).
+  // Real repo root: `.git` is a directory -> NOT skipped.
+  fs::create_directories(root / "realrepo" / ".git");
+  write_file(root / "realrepo" / "index.ts", "export const b = 2;\n");
+  // No `.git` at all -> NOT skipped.
+  fs::create_directories(root / "plain");
+  // A legitimate source module literally named `worktrees` under a NON-dotted
+  // parent -> NOT skipped (the dotted-parent guard protects it).
+  write_file(root / "src" / "worktrees" / "manager.ts", "export const c = 3;\n");
+
+  int rc = 0;
+  rc |= !cgraph::is_dependency_directory(root / ".anvil" / "worktrees" / "wt1");  // .git file    -> skip
+  rc |= !cgraph::is_dependency_directory(root / ".anvil" / "worktrees");          // dotted/worktrees -> skip
+  rc |= cgraph::is_dependency_directory(root / "realrepo");                       // .git dir     -> keep
+  rc |= cgraph::is_dependency_directory(root / "plain");                          // no .git      -> keep
+  rc |= cgraph::is_dependency_directory(root / "src" / "worktrees");              // real module  -> keep
 
   fs::remove_all(root);
   return rc ? 1 : 0;
@@ -135,5 +181,6 @@ int test_empty_gitignore() {
 
 int main() {
   return test_skipped_directory() || test_dependency_directory_marker() ||
-         test_gitignore_matches_vendored_dir() || test_empty_gitignore();
+         test_dependency_directory_worktree() || test_gitignore_matches_vendored_dir() ||
+         test_empty_gitignore();
 }

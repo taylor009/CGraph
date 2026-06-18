@@ -40,6 +40,17 @@ bool is_skipped_directory(std::string_view name) {
       ".ruff_cache",
       ".hypothesis",
       ".eggs",
+      // Agent-CLI and spec-tool config trees: tooling, not project source or
+      // documentation (their docs/templates otherwise pollute enrichment plans).
+      ".claude",
+      ".codex",
+      ".gemini",
+      ".cursor",
+      ".factory",
+      ".opencode",
+      ".windsurf",
+      ".aider",
+      ".specify",
   };
   return skipped.contains(name);
 }
@@ -48,10 +59,27 @@ bool is_dependency_directory(const std::filesystem::path& dir) {
   if (is_skipped_directory(dir.filename().generic_string())) {
     return true;
   }
+  std::error_code ec;
   // A virtualenv root carries a pyvenv.cfg marker; skip it even under a
   // non-standard name. Probed once per directory entered (not per file).
-  std::error_code ec;
-  return std::filesystem::exists(dir / "pyvenv.cfg", ec);
+  if (std::filesystem::exists(dir / "pyvenv.cfg", ec)) {
+    return true;
+  }
+  // Agent tools keep full duplicate worktree checkouts of the repo. Two markers,
+  // because both live and stale checkouts must be skipped:
+  //  - A LIVE linked worktree's `.git` is a regular FILE (`gitdir: …`), whereas
+  //    the project root's `.git` is a directory. Catches worktrees parked
+  //    anywhere, and never matches the root.
+  if (std::filesystem::is_regular_file(dir / ".git", ec)) {
+    return true;
+  }
+  //  - Tools park checkouts under `<.tool>/worktrees/<id>/` (`.anvil/worktrees/…`,
+  //    `.agents/worktrees/…`). A `worktrees` directory under a DOTTED parent is
+  //    that convention; skipping it drops STALE checkouts too (whose `.git` may
+  //    already be pruned, leaving the source tree behind). The dotted-parent
+  //    guard leaves a legitimate source `worktrees/` module untouched.
+  const auto parent = dir.parent_path().filename().generic_string();
+  return dir.filename().generic_string() == "worktrees" && !parent.empty() && parent.front() == '.';
 }
 
 std::vector<std::string> read_root_gitignore(const std::filesystem::path& root) {
