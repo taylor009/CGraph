@@ -1,5 +1,7 @@
 #include "cgraph/daemon_endpoint.hpp"
 #include "cgraph/daemon_identity.hpp"
+#include "cgraph/daemon_lifecycle.hpp"
+#include "cgraph/daemon_ops.hpp"
 #include "cgraph/daemon_server.hpp"
 #include "cgraph/engine.hpp"
 #include "cgraph/export_json.hpp"
@@ -37,7 +39,9 @@ void print_usage() {
       "  cgraph seam gen --seam SPEC.json --graphs NAME=graph.json [--graphs ...] --out DROPDIR\n"
       "        resolve a cross-service seam spec against consumer graphs into a contract fragment\n"
       "  cgraph seam fuse --seam SEAM.json --graph NAME=graph.json [--graph ...] --out DIR\n"
-      "        merge a seam fragment + service graphs into a clustered graph.json + graph.html view\n";
+      "        merge a seam fragment + service graphs into a clustered graph.json + graph.html view\n"
+      "  cgraph seam query --graph FUSED.json <query|path|explain|impact|context> [PARAMS_JSON]\n"
+      "        run a read op against a fused seam graph (cross-service); read-only\n";
 }
 
 struct Args {
@@ -358,6 +362,49 @@ int run_seam_fuse(int argc, char** argv) {
   return 0;
 }
 
+// cgraph seam query --graph FUSED.json <op> [PARAMS_JSON]
+int run_seam_query(int argc, char** argv) {
+  std::filesystem::path graph_path;
+  std::vector<std::string> positionals;
+  for (int index = 3; index < argc; ++index) {
+    const std::string arg = argv[index];
+    if (arg == "--graph" && index + 1 < argc) {
+      graph_path = argv[++index];
+    } else {
+      positionals.push_back(arg);
+    }
+  }
+  if (graph_path.empty() || positionals.empty()) {
+    std::cerr << "seam query: --graph and an op are required\n";
+    return 2;
+  }
+  const std::string& op = positionals.front();
+  // A seam is a read-only derived view: only the read ops are permitted.
+  if (op != "query" && op != "path" && op != "explain" && op != "impact" && op != "context") {
+    std::cerr << "seam query: op must be one of query|path|explain|impact|context (got '" << op
+              << "'); a seam graph is read-only\n";
+    return 2;
+  }
+
+  cgraph::DaemonState state;
+  if (!cgraph::load_graph_snapshot(state, graph_path)) {
+    std::cerr << "seam query: failed to load graph: " << graph_path << '\n';
+    return 1;
+  }
+  nlohmann::json params = nlohmann::json::object();
+  if (positionals.size() > 1) {
+    try {
+      params = nlohmann::json::parse(positionals[1]);
+    } catch (const nlohmann::json::exception& ex) {
+      std::cerr << "seam query: invalid params JSON: " << ex.what() << '\n';
+      return 2;
+    }
+  }
+  const auto response = cgraph::handle_daemon_request(state, cgraph::make_request(op, params));
+  std::cout << response.dump(2) << '\n';
+  return response.value("ok", false) ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -393,7 +440,10 @@ int main(int argc, char** argv) {
       if (sub == "fuse") {
         return run_seam_fuse(argc, argv);
       }
-      std::cerr << "usage: cgraph seam <gen|fuse> ...\n";
+      if (sub == "query") {
+        return run_seam_query(argc, argv);
+      }
+      std::cerr << "usage: cgraph seam <gen|fuse|query> ...\n";
       return 2;
     }
   }

@@ -1,6 +1,8 @@
 #include "cgraph/seam.hpp"
 
+#include "cgraph/daemon_ops.hpp"
 #include "cgraph/fragment_json.hpp"
+#include "cgraph/protocol.hpp"
 #include "cgraph/semantic_fragment_validation.hpp"
 
 #include <nlohmann/json.hpp>
@@ -255,6 +257,47 @@ int main() {
   // edges dangling -> no fused graph.
   auto dangling = cgraph::fuse_seam(frag, {});
   if (dangling.ok || dangling.errors.empty() || !dangling.graph.nodes.empty()) {
+    return 1;
+  }
+
+  // ---- the fused seam graph is queryable cross-service (the path `seam query` drives) ----
+  cgraph::DaemonState qstate;
+  cgraph::publish_graph_snapshot(qstate, std::move(fused.graph));
+
+  // impact of the schema reaches the endpoint (RESPONDS_WITH) and the consuming
+  // service (CONSUMES) -- a cross-service blast radius.
+  const auto impact = cgraph::handle_daemon_request(
+      qstate, cgraph::make_request("impact", {{"id", "schema:ml-api:v3:ScoreResult"},
+                                              {"direction", "dependents"}, {"max_depth", 3}}));
+  bool reaches_endpoint = false;
+  for (const auto& node : impact["result"]["nodes"]) {
+    if (node.value("id", std::string{}) == "endpoint:ml-api:POST /v3/score") {
+      reaches_endpoint = true;
+    }
+  }
+  if (!impact["ok"].get<bool>() || !reaches_endpoint) {
+    return 1;
+  }
+
+  // path from a backend call site to the ml-api endpoint resolves across the seam.
+  const auto path = cgraph::handle_daemon_request(
+      qstate, cgraph::make_request("path", {{"source", "backend::scoreModel"},
+                                            {"target", "endpoint:ml-api:POST /v3/score"}}));
+  if (!path["ok"].get<bool>() || path["result"]["path"].size() < 2) {
+    return 1;
+  }
+
+  // explain the endpoint: its cross-service neighbors (CONSUMES/SERVED_BY/RESPONDS_WITH).
+  const auto explain = cgraph::handle_daemon_request(
+      qstate, cgraph::make_request("explain", {{"id", "endpoint:ml-api:POST /v3/score"}}));
+  if (!explain["ok"].get<bool>() || explain["result"].value("neighbor_count", 0U) < 3U) {
+    return 1;
+  }
+
+  // a write op against a seam (no memory_dir) is rejected, not silently accepted.
+  const auto write = cgraph::handle_daemon_request(
+      qstate, cgraph::make_request("remember", {{"title", "x"}, {"body", "y"}}));
+  if (write.value("ok", true)) {
     return 1;
   }
 
