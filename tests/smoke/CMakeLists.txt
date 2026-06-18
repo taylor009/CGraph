@@ -34,6 +34,18 @@ cgraph_enable_sanitizers(cgraph_fragment_json_test)
 
 add_test(NAME cgraph_fragment_json_test COMMAND cgraph_fragment_json_test)
 
+add_executable(cgraph_seam_test
+  seam_test.cpp)
+
+target_link_libraries(cgraph_seam_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_seam_test)
+cgraph_enable_sanitizers(cgraph_seam_test)
+
+add_test(NAME cgraph_seam_test COMMAND cgraph_seam_test)
+
 add_executable(cgraph_detect_test
   detect_test.cpp)
 

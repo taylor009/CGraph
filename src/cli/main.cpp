@@ -2,9 +2,11 @@
 #include "cgraph/daemon_identity.hpp"
 #include "cgraph/daemon_server.hpp"
 #include "cgraph/engine.hpp"
+#include "cgraph/fragment_json.hpp"
 #include "cgraph/operation_stats.hpp"
 #include "cgraph/pipeline.hpp"
 #include "cgraph/protocol.hpp"
+#include "cgraph/seam.hpp"
 #include "cgraph/semantic_orchestration.hpp"
 
 #include <nlohmann/json.hpp>
@@ -16,6 +18,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -29,7 +32,9 @@ void print_usage() {
       "  cgraph enrich-ingest [--root PATH] [--out PATH] [--drop DIR]\n"
       "        merge host-dropped chunk_NN.json fragments and re-export\n"
       "  cgraph stats [--root PATH] [--since today|<ISO8601>|<N>h|<N>d]\n"
-      "        roll up the durable op-stats ledger (counts + zero-hit rate) and show live daemon stats\n";
+      "        roll up the durable op-stats ledger (counts + zero-hit rate) and show live daemon stats\n"
+      "  cgraph seam gen --seam SPEC.json --graphs NAME=graph.json [--graphs ...] --out DROPDIR\n"
+      "        resolve a cross-service seam spec against consumer graphs into a contract fragment\n";
 }
 
 struct Args {
@@ -206,6 +211,67 @@ int run_stats(const Args& args) {
   return 0;
 }
 
+// cgraph seam gen --seam SPEC --graphs NAME=path [--graphs ...] --out DROPDIR
+int run_seam_gen(int argc, char** argv) {
+  std::filesystem::path spec_path;
+  std::filesystem::path out_dir;
+  std::unordered_map<std::string, std::filesystem::path> graphs;
+  for (int index = 3; index < argc; ++index) {
+    const std::string arg = argv[index];
+    if (arg == "--seam" && index + 1 < argc) {
+      spec_path = argv[++index];
+    } else if (arg == "--out" && index + 1 < argc) {
+      out_dir = argv[++index];
+    } else if (arg == "--graphs" && index + 1 < argc) {
+      const std::string pair = argv[++index];
+      const auto eq = pair.find('=');
+      if (eq == std::string::npos) {
+        std::cerr << "seam gen: --graphs expects NAME=path, got '" << pair << "'\n";
+        return 2;
+      }
+      graphs[pair.substr(0, eq)] = pair.substr(eq + 1);
+    } else {
+      std::cerr << "seam gen: unexpected argument '" << arg << "'\n";
+      return 2;
+    }
+  }
+  if (spec_path.empty() || out_dir.empty()) {
+    std::cerr << "seam gen: --seam and --out are required\n";
+    return 2;
+  }
+
+  std::ifstream spec_input(spec_path);
+  if (!spec_input) {
+    std::cerr << "seam gen: cannot open spec: " << spec_path << '\n';
+    return 1;
+  }
+  nlohmann::json spec;
+  try {
+    spec_input >> spec;
+  } catch (const nlohmann::json::exception& ex) {
+    std::cerr << "seam gen: spec is malformed JSON: " << ex.what() << '\n';
+    return 1;
+  }
+
+  const auto result = cgraph::generate_seam(spec, graphs);
+  if (!result.ok) {
+    for (const auto& error : result.errors) {
+      std::cerr << "seam gen: ERROR: " << error << '\n';
+    }
+    return 1;
+  }
+  for (const auto& line : result.resolution_log) {
+    std::cerr << "  " << line << '\n';
+  }
+
+  std::filesystem::create_directories(out_dir);
+  const auto out_file = out_dir / "chunk_00.json";
+  std::ofstream(out_file) << cgraph::to_json(result.fragment).dump(2) << '\n';
+  std::cerr << "seam gen: wrote " << out_file << " (" << result.fragment.nodes.size()
+            << " nodes, " << result.fragment.edges.size() << " edges)\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -232,6 +298,13 @@ int main(int argc, char** argv) {
         return run_enrich_ingest(args);
       }
       return run_stats(args);
+    }
+    if (first == "seam") {
+      if (argc < 3 || std::string(argv[2]) != "gen") {
+        std::cerr << "usage: cgraph seam gen --seam SPEC.json --graphs NAME=graph.json --out DROPDIR\n";
+        return 2;
+      }
+      return run_seam_gen(argc, argv);
     }
   }
 
