@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace cgraph {
@@ -31,5 +32,22 @@ struct SeamResult {
 [[nodiscard]] SeamResult generate_seam(
     const nlohmann::json& spec,
     const std::unordered_map<std::string, std::filesystem::path>& graph_paths);
+
+// Result of fusing a seam fragment with its service graphs into one view graph.
+struct SeamFuseResult {
+  bool ok = false;
+  GraphSnapshot graph;
+  std::vector<std::string> errors;
+};
+
+// Merge a seam fragment with the named consumer code graphs into a single
+// community-clustered view graph: every service node is tagged with its service
+// name, seam contract nodes with their community, shadow code-refs are dropped
+// (the real service node already carries that id), and edges are deduplicated.
+// View-only -- the result is a static render artifact, not a daemon. Fails loud
+// (ok=false) if any edge endpoint is missing from the fused node set.
+[[nodiscard]] SeamFuseResult fuse_seam(
+    const Fragment& seam,
+    const std::vector<std::pair<std::string, GraphSnapshot>>& services);
 
 }  // namespace cgraph

@@ -39,6 +39,25 @@ bool has_edge(const cgraph::Fragment& frag, const std::string& src, const std::s
   return false;
 }
 
+const cgraph::Node* find_in(const cgraph::GraphSnapshot& graph, const std::string& id) {
+  for (const auto& node : graph.nodes) {
+    if (node.id == id) {
+      return &node;
+    }
+  }
+  return nullptr;
+}
+
+bool has_snapshot_edge(const cgraph::GraphSnapshot& graph, const std::string& src,
+                       const std::string& tgt, const std::string& rel) {
+  for (const auto& edge : graph.edges) {
+    if (edge.source == src && edge.target == tgt && edge.relation == rel) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // The canonical spec used by the happy-path and (mutated) error-path tests.
 json make_spec() {
   return json{
@@ -185,6 +204,57 @@ int main() {
   json malformed = make_spec();
   malformed.erase("provider");
   if (!expect_fail(malformed, graphs)) {
+    return 1;
+  }
+
+  // ---- fuse: merge the seam fragment with the real service graph into a view ----
+  // The backend service graph carries the REAL nodes the seam's shadows reference.
+  cgraph::GraphSnapshot backend;
+  backend.nodes.push_back(cgraph::Node{.id = "backend::scoreModel", .label = "scoreModel",
+                                       .kind = "function"});
+  backend.nodes.push_back(cgraph::Node{.id = "backend::ScoreResult", .label = "ScoreResult",
+                                       .kind = "interface"});
+  backend.nodes.push_back(cgraph::Node{.id = "backend::helper", .label = "helper",
+                                       .kind = "function"});
+  backend.edges.push_back(
+      cgraph::Edge{.source = "backend::scoreModel", .target = "backend::helper", .relation = "CALLS"});
+
+  auto fused = cgraph::fuse_seam(frag, {{"backend", backend}});
+  if (!fused.ok) {
+    return 1;
+  }
+  // Every backend node is tagged with its service community; the call site is the
+  // REAL node (kind function), not a dropped code-ref shadow.
+  const auto* score = find_in(fused.graph, "backend::scoreModel");
+  if (score == nullptr || score->kind != "function" ||
+      score->properties.at("community") != "backend") {
+    return 1;
+  }
+  // No code-ref shadow survives the fuse.
+  for (const auto& node : fused.graph.nodes) {
+    if (node.kind == "code-ref") {
+      return 1;
+    }
+  }
+  // Seam contract nodes cluster with their service / provider.
+  const auto* svc = find_in(fused.graph, "service:backend");
+  const auto* ep = find_in(fused.graph, "endpoint:ml-api:POST /v3/score");
+  if (svc == nullptr || svc->properties.at("community") != "backend" || ep == nullptr ||
+      ep->properties.at("community") != "ml-api") {
+    return 1;
+  }
+  // The CONSUMED_AT contract edge now binds to the real backend node, and the
+  // backend's own CALLS edge survived the merge.
+  if (!has_snapshot_edge(fused.graph, "endpoint:ml-api:POST /v3/score", "backend::scoreModel",
+                         "CONSUMED_AT") ||
+      !has_snapshot_edge(fused.graph, "backend::scoreModel", "backend::helper", "CALLS")) {
+    return 1;
+  }
+
+  // Fail loud: omitting the backend service graph leaves CONSUMED_AT/MIRRORED_BY
+  // edges dangling -> no fused graph.
+  auto dangling = cgraph::fuse_seam(frag, {});
+  if (dangling.ok || dangling.errors.empty() || !dangling.graph.nodes.empty()) {
     return 1;
   }
 

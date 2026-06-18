@@ -2,6 +2,7 @@
 #include "cgraph/daemon_identity.hpp"
 #include "cgraph/daemon_server.hpp"
 #include "cgraph/engine.hpp"
+#include "cgraph/export_json.hpp"
 #include "cgraph/fragment_json.hpp"
 #include "cgraph/operation_stats.hpp"
 #include "cgraph/pipeline.hpp"
@@ -34,7 +35,9 @@ void print_usage() {
       "  cgraph stats [--root PATH] [--since today|<ISO8601>|<N>h|<N>d]\n"
       "        roll up the durable op-stats ledger (counts + zero-hit rate) and show live daemon stats\n"
       "  cgraph seam gen --seam SPEC.json --graphs NAME=graph.json [--graphs ...] --out DROPDIR\n"
-      "        resolve a cross-service seam spec against consumer graphs into a contract fragment\n";
+      "        resolve a cross-service seam spec against consumer graphs into a contract fragment\n"
+      "  cgraph seam fuse --seam SEAM.json --graph NAME=graph.json [--graph ...] --out DIR\n"
+      "        merge a seam fragment + service graphs into a clustered graph.json + graph.html view\n";
 }
 
 struct Args {
@@ -272,6 +275,89 @@ int run_seam_gen(int argc, char** argv) {
   return 0;
 }
 
+// cgraph seam fuse --seam SEAM --graph NAME=path [--graph ...] --out DIR
+int run_seam_fuse(int argc, char** argv) {
+  std::filesystem::path seam_path;
+  std::filesystem::path out_dir;
+  std::vector<std::pair<std::string, std::filesystem::path>> graph_specs;
+  for (int index = 3; index < argc; ++index) {
+    const std::string arg = argv[index];
+    if (arg == "--seam" && index + 1 < argc) {
+      seam_path = argv[++index];
+    } else if (arg == "--out" && index + 1 < argc) {
+      out_dir = argv[++index];
+    } else if (arg == "--graph" && index + 1 < argc) {
+      const std::string pair = argv[++index];
+      const auto eq = pair.find('=');
+      if (eq == std::string::npos) {
+        std::cerr << "seam fuse: --graph expects NAME=path, got '" << pair << "'\n";
+        return 2;
+      }
+      graph_specs.emplace_back(pair.substr(0, eq), pair.substr(eq + 1));
+    } else {
+      std::cerr << "seam fuse: unexpected argument '" << arg << "'\n";
+      return 2;
+    }
+  }
+  if (seam_path.empty() || out_dir.empty()) {
+    std::cerr << "seam fuse: --seam and --out are required\n";
+    return 2;
+  }
+
+  std::ifstream seam_input(seam_path);
+  if (!seam_input) {
+    std::cerr << "seam fuse: cannot open seam: " << seam_path << '\n';
+    return 1;
+  }
+  nlohmann::json seam_json;
+  try {
+    seam_input >> seam_json;
+  } catch (const nlohmann::json::exception& ex) {
+    std::cerr << "seam fuse: seam is malformed JSON: " << ex.what() << '\n';
+    return 1;
+  }
+  cgraph::Fragment seam;
+  std::vector<std::string> parse_errors;
+  if (!cgraph::parse_fragment(seam_json, seam, parse_errors)) {
+    for (const auto& error : parse_errors) {
+      std::cerr << "seam fuse: " << error << '\n';
+    }
+    return 1;
+  }
+
+  std::vector<std::pair<std::string, cgraph::GraphSnapshot>> services;
+  for (const auto& [name, path] : graph_specs) {
+    std::ifstream graph_input(path);
+    if (!graph_input) {
+      std::cerr << "seam fuse: cannot open graph '" << name << "': " << path << '\n';
+      return 1;
+    }
+    nlohmann::json graph_json;
+    try {
+      graph_input >> graph_json;
+    } catch (const nlohmann::json::exception& ex) {
+      std::cerr << "seam fuse: graph '" << name << "' is malformed JSON: " << ex.what() << '\n';
+      return 1;
+    }
+    services.emplace_back(name, cgraph::parse_node_link_graph(graph_json));
+  }
+
+  const auto fused = cgraph::fuse_seam(seam, services);
+  if (!fused.ok) {
+    for (const auto& error : fused.errors) {
+      std::cerr << "seam fuse: ERROR: " << error << '\n';
+    }
+    return 1;
+  }
+
+  std::filesystem::create_directories(out_dir);
+  std::ofstream(out_dir / "graph.json") << cgraph::to_node_link_json(fused.graph).dump(2) << '\n';
+  std::ofstream(out_dir / "graph.html") << cgraph::export_graph_html(fused.graph);
+  std::cerr << "seam fuse: wrote " << (out_dir / "graph.html") << " (" << fused.graph.nodes.size()
+            << " nodes, " << fused.graph.edges.size() << " edges)\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -300,11 +386,15 @@ int main(int argc, char** argv) {
       return run_stats(args);
     }
     if (first == "seam") {
-      if (argc < 3 || std::string(argv[2]) != "gen") {
-        std::cerr << "usage: cgraph seam gen --seam SPEC.json --graphs NAME=graph.json --out DROPDIR\n";
-        return 2;
+      const std::string sub = argc >= 3 ? argv[2] : "";
+      if (sub == "gen") {
+        return run_seam_gen(argc, argv);
       }
-      return run_seam_gen(argc, argv);
+      if (sub == "fuse") {
+        return run_seam_fuse(argc, argv);
+      }
+      std::cerr << "usage: cgraph seam <gen|fuse> ...\n";
+      return 2;
     }
   }
 

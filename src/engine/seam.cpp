@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace cgraph {
@@ -136,7 +137,110 @@ bool fail(SeamResult& result, std::string message) {
   return true;
 }
 
+// The cluster a seam contract node belongs to: a service is its own cluster; an
+// endpoint/schema clusters with its provider.
+[[nodiscard]] std::string seam_community(const Node& node) {
+  if (node.id.starts_with("service:")) {
+    return node.label.empty() ? node.id.substr(8) : node.label;
+  }
+  if (node.id.starts_with("endpoint:")) {
+    if (const auto it = node.properties.find("provider"); it != node.properties.end()) {
+      return it->second;
+    }
+  }
+  if (node.id.starts_with("schema:")) {
+    // schema:<provider>:<api_version>:<name> -> <provider>
+    const auto first = node.id.find(':');
+    const auto second = node.id.find(':', first + 1);
+    if (first != std::string::npos && second != std::string::npos) {
+      return node.id.substr(first + 1, second - first - 1);
+    }
+  }
+  return "";
+}
+
 }  // namespace
+
+SeamFuseResult fuse_seam(const Fragment& seam,
+                         const std::vector<std::pair<std::string, GraphSnapshot>>& services) {
+  SeamFuseResult result;
+  result.ok = true;
+
+  std::vector<Node> nodes;
+  std::unordered_map<std::string, std::size_t> index;  // id -> position in `nodes`
+  auto put = [&](Node node, bool authoritative) {
+    if (const auto it = index.find(node.id); it != index.end()) {
+      if (authoritative) {
+        nodes[it->second] = std::move(node);  // real service node wins over a seam placeholder
+      }
+      return;
+    }
+    index.emplace(node.id, nodes.size());
+    nodes.push_back(std::move(node));
+  };
+
+  std::vector<Edge> edges;
+  std::unordered_set<std::string> seen_edges;
+  auto add_edge = [&](const Edge& edge) {
+    const auto key = edge.source + "\x1f" + edge.target + "\x1f" + edge.relation;
+    if (seen_edges.insert(key).second) {
+      edges.push_back({.source = edge.source, .target = edge.target, .relation = edge.relation});
+    }
+  };
+
+  // 1. Service code graphs: one community per service; real service nodes are authoritative.
+  for (const auto& [name, graph] : services) {
+    for (const auto& node : graph.nodes) {
+      Node tagged = node;
+      tagged.properties["community"] = name;
+      tagged.properties.try_emplace("service", name);
+      put(std::move(tagged), /*authoritative=*/true);
+    }
+    for (const auto& edge : graph.edges) {
+      add_edge(edge);
+    }
+  }
+
+  // 2. Seam contract nodes cluster with their service/provider; shadow code-refs
+  // are dropped (the real service node already carries that id and neighborhood).
+  for (const auto& node : seam.nodes) {
+    if (node.kind == "code-ref") {
+      continue;
+    }
+    Node tagged = node;
+    tagged.properties["community"] = seam_community(node);
+    put(std::move(tagged), /*authoritative=*/false);
+  }
+  for (const auto& edge : seam.edges) {
+    add_edge(edge);
+  }
+
+  // 3. Fail loud: every edge endpoint must resolve to a fused node (else a service
+  // graph was not supplied) -- never render a dangling picture.
+  std::vector<std::string> missing;
+  for (const auto& edge : edges) {
+    if (!index.contains(edge.source)) {
+      missing.push_back(edge.relation + ": source=" + edge.source);
+    }
+    if (!index.contains(edge.target)) {
+      missing.push_back(edge.relation + ": target=" + edge.target);
+    }
+  }
+  if (!missing.empty()) {
+    result.ok = false;
+    result.errors.push_back(
+        std::to_string(missing.size()) +
+        " edge endpoint(s) missing from the fused node set (supply the owning service graph via "
+        "--graph): " +
+        missing.front());
+    return result;
+  }
+
+  result.graph.nodes = std::move(nodes);
+  result.graph.edges = std::move(edges);
+  result.graph.build_state = BuildState::DeterministicReady;
+  return result;
+}
 
 SeamResult generate_seam(const nlohmann::json& spec,
                          const std::unordered_map<std::string, std::filesystem::path>& graph_paths) {
