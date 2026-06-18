@@ -102,25 +102,30 @@ never conflated.
   and a window mixing `schema_version`s is reported rather than silently merged
 
 ### Requirement: Adaptive relevance-gated context gathering
-The `pack_context` path SHALL support a flag-gated adaptive gather mode, selected by a `gather`
-parameter (`"fixed"` default, `"adaptive"`), that changes which candidates the BFS collects and adds
-an additive gather-reach summary to the response (see "Adaptive responses report gather reach"); the
-per-entry focus/included/omitted shape SHALL be otherwise identical between `fixed` and `adaptive`.
-Under `gather = "fixed"` the gathered candidate set and the existing response fields SHALL be
-byte-for-byte unchanged from the current fixed k-hop BFS. Under `gather = "adaptive"` the gather SHALL
-expand all nodes at depth 0 and 1 unconditionally (preserving the full 2-hop core), and SHALL expand a
-node at depth ≥ 2 only when its query lexical-overlap is ≥ `gather_theta` (default 0.05), to a maximum
-depth of 3, so that the third hop is taken only along query-relevant paths. Adaptive gather SHALL use
-the existing knapsack fill and the existing deterministic relevance signal; it SHALL introduce no
-model or LLM. `gather = "adaptive"` SHALL NOT be the default in this change.
+The `pack_context` path SHALL support a `gather` parameter (`"adaptive"` **default**, `"fixed"`) that
+changes which candidates the BFS collects and adds an additive gather-reach summary to the response
+(see "Adaptive responses report gather reach"); the per-entry focus/included/omitted shape SHALL be
+otherwise identical between `fixed` and `adaptive`. Under `gather = "fixed"` the gathered candidate
+set and the existing response fields SHALL be byte-for-byte unchanged from the historical fixed
+k-hop BFS (the pre-flip default), so callers can opt back into it exactly. Under `gather =
+"adaptive"` (the default) the gather SHALL expand all nodes at depth 0 and 1 unconditionally
+(preserving the full 2-hop core), and SHALL expand a node at depth ≥ 2 only when its query
+lexical-overlap is ≥ `gather_theta` (default 0.05), to a maximum depth of 3, so that the third hop is
+taken only along query-relevant paths. Adaptive gather SHALL use the existing knapsack fill and the
+existing deterministic relevance signal; it SHALL introduce no model or LLM.
 
-#### Scenario: Default gather is unchanged
-- **WHEN** a `context` request omits `gather` (or sets `gather = "fixed"`)
-- **THEN** the gathered candidate set and the pre-existing response fields are identical to the
-  current fixed k-hop behavior for the same focal, budget, and packing
+#### Scenario: Default gather is adaptive
+- **WHEN** a `context` request omits `gather`
+- **THEN** the gather is `"adaptive"` (knapsack packing, depth 3, θ=0.05 gate) and the response
+  reports `gather: "adaptive"`
+
+#### Scenario: Explicit fixed gather is unchanged
+- **WHEN** a `context` request sets `gather = "fixed"`
+- **THEN** the gathered candidate set and the pre-existing response fields are byte-for-byte
+  identical to the historical fixed k-hop behavior for the same focal, budget, and packing
 
 #### Scenario: Adaptive keeps the 2-hop core and gates the third hop
-- **WHEN** a `context` request sets `gather = "adaptive"` with a `gather_theta`
+- **WHEN** a `context` request runs adaptive gather with a `gather_theta`
 - **THEN** every node within 2 hops of the focal is still gathered, and a node at depth 2 expands
   its depth-3 neighbors only if its query lexical-overlap is ≥ `gather_theta`; a depth-2 node below
   the threshold contributes no depth-3 neighbors
@@ -131,17 +136,17 @@ model or LLM. `gather = "adaptive"` SHALL NOT be the default in this change.
   cost far below the full 3-hop gather
 
 ### Requirement: In-engine revalidation gates adaptive gather
-The adaptive gather mode SHALL remain non-default until its grade-2 recall improvement is
-reproduced through the engine's own token accounting (capped source-slice char/4 cost and the
-response's real packing), not only the offline Python harness. A parity test SHALL drive the
-`context` op with `gather = "adaptive"` over the evaluation rows and assert the in-engine recall and
-candidate-cost deltas against recorded targets. The parity test SHALL measure against a committed,
-version-controlled fixture pair (a deterministic code-only graph and a verbatim eval snapshot), NOT
-the mutable working-tree artifacts (`cgraph-out/graph.json`, `research/eval/queries.jsonl`), so the
-gate is reproducible and immune to daemon-state or working-tree drift. Because the fixture is always
-present, the gate SHALL run on every checkout including CI; the artifact-absent skip SHALL remain
-only as a defensive fallback for the case where the fixture is missing. The recorded targets and
-tolerance SHALL be unchanged by this stabilization.
+The `context` default gather SHALL be `"adaptive"`, and a parity test SHALL guard that default by
+reproducing its grade-2 recall improvement through the engine's own token accounting (capped
+source-slice cost and the response's real packing), not only the offline Python harness. The parity
+test SHALL drive the `context` op with `gather = "adaptive"` over the evaluation rows and assert the
+in-engine recall and candidate-cost deltas against recorded targets. It SHALL measure against a
+committed, version-controlled fixture pair (a deterministic code-only graph and a verbatim eval
+snapshot), NOT the mutable working-tree artifacts (`cgraph-out/graph.json`,
+`research/eval/queries.jsonl`), so the gate is reproducible and immune to daemon-state or
+working-tree drift. Because the fixture is always present, the gate SHALL run on every checkout
+including CI; the artifact-absent skip SHALL remain only as a defensive fallback for the case where
+the fixture is missing. The recorded targets and tolerance SHALL be unchanged by the default flip.
 
 #### Scenario: Parity gate reproduces the recall gain in-engine
 - **WHEN** the parity test runs `gather = "adaptive"` against the committed fixture rows
@@ -166,13 +171,13 @@ retrieval and packing strategy produced the bundle without inferring it from oth
 SHALL reflect the strategy actually used after defaults and the `adaptive`-implies-`knapsack` coupling
 are applied.
 
-#### Scenario: Greedy response names its mode
-- **WHEN** a `context` request runs with the default packing and gather (greedy, fixed)
-- **THEN** the response includes `gather: "fixed"` and `packing: "greedy"`
-
-#### Scenario: Adaptive response names its mode
-- **WHEN** a `context` request sets `gather = "adaptive"`
+#### Scenario: Default response names its mode
+- **WHEN** a `context` request runs with the defaults (adaptive gather)
 - **THEN** the response includes `gather: "adaptive"` and `packing: "knapsack"`
+
+#### Scenario: Explicit fixed/greedy response names its mode
+- **WHEN** a `context` request sets `gather = "fixed"` with default packing
+- **THEN** the response includes `gather: "fixed"` and `packing: "greedy"`
 
 ### Requirement: Adaptive responses report gather reach
 When `gather = "adaptive"`, the `context` response SHALL include a `reach` summary reporting the total
