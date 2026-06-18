@@ -131,33 +131,119 @@ std::optional<nlohmann::json> request_over_unix_socket(const std::filesystem::pa
 
 #else
 
-int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions options) {
-  const auto identity = daemon_identity_for(root);
-  const auto socket_path = unix_socket_path(identity);
+namespace {
+
+// Open a Unix-domain listening socket at socket_path (clearing any stale endpoint
+// from a crashed daemon). Returns the listen fd, or -1 on failure (already logged).
+// Shared by the full build-and-watch server and the static seam server.
+[[nodiscard]] int open_listen_socket(const std::filesystem::path& socket_path) {
   ensure_unix_socket_dir(socket_path);
-  ::unlink(socket_path.c_str());  // clear any stale endpoint from a crashed daemon
+  ::unlink(socket_path.c_str());
 
   const int listen_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
   if (listen_fd < 0) {
     std::cerr << "graphd: socket() failed: " << std::strerror(errno) << '\n';
-    return 1;
+    return -1;
   }
-
   sockaddr_un addr{};
   if (!fill_sockaddr(addr, socket_path.string())) {
     std::cerr << "graphd: socket path too long: " << socket_path << '\n';
     ::close(listen_fd);
-    return 1;
+    return -1;
   }
   if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
     std::cerr << "graphd: bind() failed: " << std::strerror(errno) << '\n';
     ::close(listen_fd);
-    return 1;
+    return -1;
   }
   if (::listen(listen_fd, 16) != 0) {
     std::cerr << "graphd: listen() failed: " << std::strerror(errno) << '\n';
     ::close(listen_fd);
     (void)cleanup_daemon_endpoint(socket_path);
+    return -1;
+  }
+  return listen_fd;
+}
+
+}  // namespace
+
+// A static, read-only daemon serving a pre-fused seam graph: load graph.json,
+// publish the snapshot, and answer the read ops via handle_daemon_request -- no
+// build, no watcher, no persistence, no enrichment. `update` reloads graph.json
+// (re-fuse -> update refreshes); writes are rejected (no memory_dir). Selected by
+// graphd when the root carries a seam marker (see is_seam_directory).
+int run_static_seam_server(const std::filesystem::path& root, DaemonServerOptions options) {
+  const auto identity = daemon_identity_for(root);
+  const auto socket_path = unix_socket_path(identity);
+  const int listen_fd = open_listen_socket(socket_path);
+  if (listen_fd < 0) {
+    return 1;
+  }
+
+  DaemonState state;
+  state.pid = ::getpid();
+  const auto graph_path = root / "graph.json";
+  if (!load_graph_snapshot(state, graph_path)) {
+    std::cerr << "graphd: failed to load seam graph: " << graph_path << '\n';
+    ::close(listen_fd);
+    (void)cleanup_daemon_endpoint(socket_path);
+    return 1;
+  }
+  state.update_handler = [&state, graph_path](const nlohmann::json&) -> nlohmann::json {
+    if (load_graph_snapshot(state, graph_path)) {
+      const auto graph = read_graph_snapshot(state);
+      return {{"reloaded", true}, {"nodes", graph->nodes.size()}, {"edges", graph->edges.size()}};
+    }
+    return {{"reloaded", false}};
+  };
+  std::cerr << "graphd: serving static seam graph " << graph_path << " ("
+            << read_graph_snapshot(state)->nodes.size() << " nodes)\n";
+
+  auto last_activity = FileWatcherClock::now();
+  while (!state.shutdown_requested) {
+    fd_set read_set;
+    FD_ZERO(&read_set);
+    FD_SET(listen_fd, &read_set);
+    timeval timeout{};
+    timeout.tv_sec = 1;
+    const int ready = ::select(listen_fd + 1, &read_set, nullptr, nullptr, &timeout);
+    if (ready < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+    if (ready == 0) {
+      if (FileWatcherClock::now() - last_activity >= options.idle_timeout) {
+        std::cerr << "graphd: idle timeout, shutting down\n";
+        break;
+      }
+      continue;
+    }
+    const int conn = ::accept(listen_fd, nullptr, nullptr);
+    if (conn < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+    last_activity = FileWatcherClock::now();
+    if (const auto request = read_frame(conn)) {
+      const auto response = handle_daemon_request(state, *request);
+      (void)write_frame(conn, response);
+    }
+    ::close(conn);
+  }
+  ::close(listen_fd);
+  (void)cleanup_daemon_endpoint(socket_path);
+  return 0;
+}
+
+int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions options) {
+  const auto identity = daemon_identity_for(root);
+  const auto socket_path = unix_socket_path(identity);
+  const int listen_fd = open_listen_socket(socket_path);
+  if (listen_fd < 0) {
     return 1;
   }
 

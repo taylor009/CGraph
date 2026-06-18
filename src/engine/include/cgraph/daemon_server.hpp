@@ -41,6 +41,14 @@ struct DaemonServerOptions {
 // the idle timeout. Returns 0 on clean exit, non-zero on a setup failure.
 [[nodiscard]] int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions options = {});
 
+// Runs a static, read-only daemon over a pre-fused seam graph (`root/graph.json`):
+// serves the read ops from the loaded snapshot with no build, watcher, persistence,
+// or enrichment; `update` reloads the graph, writes are rejected. graphd selects
+// this when `root` carries the seam marker (is_seam_directory). Returns 0 on clean
+// exit, non-zero on a setup/load failure.
+[[nodiscard]] int run_static_seam_server(const std::filesystem::path& root,
+                                         DaemonServerOptions options = {});
+
 // Connects to a daemon's Unix socket, sends one request frame, and returns the
 // decoded response. Returns nullopt if the socket is absent/unreachable or the
 // exchange fails — the signal the thin client uses to spawn and retry.

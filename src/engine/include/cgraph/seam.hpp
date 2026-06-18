@@ -6,11 +6,19 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace cgraph {
+
+// Marker file `seam fuse` writes into its output dir; its presence tells graphd to
+// serve that dir as a static read-only seam graph rather than build-and-watch it.
+inline constexpr std::string_view kSeamMarkerFile = ".cgraph-seam";
+
+// True iff `root` is a fused-seam output directory (carries the seam marker).
+[[nodiscard]] bool is_seam_directory(const std::filesystem::path& root);
 
 // Result of generating a cross-service seam fragment. On success `ok` is true and
 // `fragment` holds the contract graph; on any hard error (malformed spec, unknown

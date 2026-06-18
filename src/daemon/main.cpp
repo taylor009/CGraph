@@ -3,6 +3,7 @@
 #include "cgraph/daemon_server.hpp"
 #include "cgraph/engine.hpp"
 #include "cgraph/protocol.hpp"
+#include "cgraph/seam.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -92,6 +93,10 @@ int main(int argc, char** argv) {
   options.idle_timeout = idle_timeout;
   if (!watch) {
     options.code_poll_interval = std::chrono::milliseconds{0};  // 0 disables live watching
+  }
+  // A fused-seam output dir is served statically (read-only, no build/watch).
+  if (cgraph::is_seam_directory(root)) {
+    return cgraph::run_static_seam_server(root, options);
   }
   return cgraph::run_daemon_server(root, options);
 }

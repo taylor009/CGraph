@@ -10,6 +10,11 @@
 
 namespace cgraph {
 
+bool is_seam_directory(const std::filesystem::path& root) {
+  std::error_code ec;
+  return std::filesystem::exists(root / kSeamMarkerFile, ec);
+}
+
 namespace {
 
 // A consumer graph loaded just enough to resolve (file, line) anchors to real

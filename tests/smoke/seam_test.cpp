@@ -301,6 +301,17 @@ int main() {
     return 1;
   }
 
+  // is_seam_directory: true only when the marker is present.
+  const auto seamdir = root / "seamview";
+  fs::create_directories(seamdir);
+  if (cgraph::is_seam_directory(seamdir)) {
+    return 1;  // no marker yet
+  }
+  std::ofstream(seamdir / std::string(cgraph::kSeamMarkerFile)) << "x";
+  if (!cgraph::is_seam_directory(seamdir)) {
+    return 1;  // marker present
+  }
+
   fs::remove_all(root);
   return 0;
 }

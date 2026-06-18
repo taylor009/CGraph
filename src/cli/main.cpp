@@ -357,6 +357,8 @@ int run_seam_fuse(int argc, char** argv) {
   std::filesystem::create_directories(out_dir);
   std::ofstream(out_dir / "graph.json") << cgraph::to_node_link_json(fused.graph).dump(2) << '\n';
   std::ofstream(out_dir / "graph.html") << cgraph::export_graph_html(fused.graph);
+  // Marker: tells graphd to serve this dir as a static read-only seam graph.
+  std::ofstream(out_dir / cgraph::kSeamMarkerFile) << "cgraph seam fuse output\n";
   std::cerr << "seam fuse: wrote " << (out_dir / "graph.html") << " (" << fused.graph.nodes.size()
             << " nodes, " << fused.graph.edges.size() << " edges)\n";
   return 0;
