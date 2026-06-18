@@ -41,18 +41,45 @@ int main() {
     return 1;
   }
 
-  // A .sql file produces exactly one file-level node (kind sql_file), no symbols,
-  // no edges -- the contents are not parsed.
+  // A .sql migration yields: the file-level node, name-keyed table/enum nodes, and
+  // a foreign-key `references` edge between the owning and referenced tables.
+  const auto find = [](const cgraph::Fragment& f, const std::string& kind,
+                       const std::string& label) -> const cgraph::Node* {
+    for (const auto& node : f.nodes) {
+      if (node.kind == kind && node.label == label) {
+        return &node;
+      }
+    }
+    return nullptr;
+  };
   const auto sql = cgraph::extract_sql(cgraph::ExtractionContext{
       .source_file = "prisma/migrations/20201214_baseline/migration.sql",
-      .source = "CREATE TYPE \"Role\" AS ENUM ('USER','ADMIN');\nCREATE TABLE \"Thread\" (id TEXT);",
+      .source = "CREATE TYPE \"Role\" AS ENUM ('USER','ADMIN');\n"
+                "CREATE TABLE \"Brand\" (id TEXT);\n"
+                "CREATE TABLE \"Project\" (id TEXT);\n"
+                "ALTER TABLE \"Brand\" ADD FOREIGN KEY(\"projectId\")REFERENCES \"Project\"(\"id\");",
   });
-  if (sql.fragment.nodes.size() != 1 || !sql.fragment.edges.empty()) {
+  const auto* file_node = find(sql.fragment, "sql_file", "migration.sql");
+  const auto* brand = find(sql.fragment, "sql_table", "Brand");
+  const auto* project = find(sql.fragment, "sql_table", "Project");
+  const auto* role = find(sql.fragment, "sql_enum", "Role");
+  if (file_node == nullptr || brand == nullptr || project == nullptr || role == nullptr) {
     return 1;
   }
-  if (sql.fragment.nodes[0].kind != "sql_file" ||
-      sql.fragment.nodes[0].label != "migration.sql" ||
-      sql.fragment.nodes[0].source_file != "prisma/migrations/20201214_baseline/migration.sql") {
+  // Exactly one references edge, Brand -> Project, with endpoints matching the table node ids.
+  if (sql.fragment.edges.size() != 1 || sql.fragment.edges[0].relation != "references" ||
+      sql.fragment.edges[0].source != brand->id || sql.fragment.edges[0].target != project->id) {
+    return 1;
+  }
+
+  // Name-keyed merge intent: the same table CREATEd in a DIFFERENT file has the same
+  // id (path-independent), so the graph builder collapses them to one node.
+  const auto sql2 = cgraph::extract_sql(cgraph::ExtractionContext{
+      .source_file = "prisma/migrations/20210101_other/migration.sql",
+      .source = "CREATE TABLE \"Brand\" (id TEXT);",
+  });
+  const auto* brand2 = find(sql2.fragment, "sql_table", "Brand");
+  if (brand2 == nullptr || brand2->id != brand->id) {
     return 1;
   }
 

@@ -154,20 +154,77 @@ ExtractionResult extract_mcp_config(const ExtractionContext& context) {
 // follow-up); no source_location, no symbols, no edges.
 ExtractionResult extract_sql(const ExtractionContext& context) {
   ExtractionResult result;
+  auto& fragment = result.fragment;
   const auto& source_file = context.source_file;
+  const auto& source = context.source;
   const auto slash = source_file.find_last_of("/\\");
   const std::string filename =
       slash == std::string::npos ? source_file : source_file.substr(slash + 1);
   if (filename.empty()) {
     return result;
   }
-  result.fragment.nodes.push_back(Node{
+
+  // File-level node: the .sql file as a discoverable/enrichable/anchorable entity.
+  fragment.nodes.push_back(Node{
       .id = make_id(source_file + ":sql_file:" + filename),
       .label = filename,
       .source_file = source_file,
       .kind = "sql_file",
       .confidence = Confidence::Extracted,
   });
+
+  // Schema entities. Ids are keyed on the entity NAME (not the file path) so the
+  // same table/enum across append-only migrations merges to one node in the graph
+  // builder; the first CREATE defines the node (source_file/line), later ALTERs add
+  // only edges.
+  const auto add_entity =
+      [&](const std::regex& pattern, std::string kind, const std::string& id_prefix) {
+        const auto end = std::cregex_iterator();
+        for (auto it = std::cregex_iterator(source.data(), source.data() + source.size(), pattern);
+             it != end; ++it) {
+          const auto& match = *it;
+          std::string name = match[1].str();
+          if (name.empty()) {
+            continue;
+          }
+          fragment.nodes.push_back(Node{
+              .id = make_id(id_prefix + name),
+              .label = std::move(name),
+              .source_file = source_file,
+              .source_location = line_location(source, static_cast<std::size_t>(match.position(1))),
+              .kind = kind,
+              .confidence = Confidence::Extracted,
+          });
+        }
+      };
+  add_entity(
+      std::regex{R"rx(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"([^"]+)")rx", std::regex::icase},
+      "sql_table", "sql_table:");
+  add_entity(std::regex{R"rx(CREATE\s+TYPE\s+"([^"]+)"\s+AS\s+ENUM)rx", std::regex::icase},
+             "sql_enum", "sql_enum:");
+
+  // Foreign keys -> table->table `references` edges (reusing the existing relation
+  // so impact / typed explain / query routing operate over the schema). Matches the
+  // Prisma form `ALTER TABLE "X" ADD [CONSTRAINT "c"] FOREIGN KEY (...) REFERENCES "Y"`.
+  const std::regex fk{
+      R"rx(ALTER\s+TABLE\s+"([^"]+)"\s+ADD\s+(?:CONSTRAINT\s+"[^"]+"\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+"([^"]+)")rx",
+      std::regex::icase};
+  const auto end = std::cregex_iterator();
+  for (auto it = std::cregex_iterator(source.data(), source.data() + source.size(), fk); it != end;
+       ++it) {
+    const auto& match = *it;
+    const std::string owner = match[1].str();
+    const std::string target = match[2].str();
+    if (owner.empty() || target.empty()) {
+      continue;
+    }
+    fragment.edges.push_back(Edge{
+        .source = make_id("sql_table:" + owner),
+        .target = make_id("sql_table:" + target),
+        .relation = "references",
+        .confidence = Confidence::Extracted,
+    });
+  }
   return result;
 }
 
