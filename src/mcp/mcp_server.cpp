@@ -40,10 +40,16 @@ namespace {
   return nlohmann::json::array({
       tool_schema(
           "graph_query",
-          "Find symbols (functions, classes, files, modules) in this project's code graph by name. "
-          "Case-insensitive substring match, ranked by importance; each hit carries source_file and "
-          "line, plus did-you-mean suggestions when nothing matches. Prefer this over grep to locate "
-          "a definition; feed the returned id into graph_explain / graph_impact / graph_context.",
+          "Find symbols by name AND answer structural questions in one call -- it routes by intent "
+          "and reports which route ran in a `route` field. Ask a structural question directly in "
+          "plain words: \"who calls X\" / \"callers of X\", \"what does X call\" / \"callees of X\", "
+          "\"references to X\" / \"uses of X\", \"implementations of X\" / \"subclasses of X\", "
+          "\"who imports X\" -- and it returns the typed neighbors (no need to graph_query then "
+          "graph_explain). A unique exact symbol name returns that node plus a callers/callees/"
+          "references summary (route \"entity\"). Anything else is a case-insensitive name search "
+          "ranked by importance (route \"search\"), with did-you-mean suggestions when nothing "
+          "matches. Prefer this over grep to locate a definition; feed a returned id into "
+          "graph_explain / graph_impact / graph_context for more depth.",
           {{"query", string_param("substring of the symbol name or id to find")},
            {"kind", string_param("only nodes of this kind, e.g. function, class, file")},
            {"file", string_param("only nodes whose source file path contains this substring")},

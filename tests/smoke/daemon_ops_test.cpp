@@ -117,6 +117,51 @@ int main() {
     return 1;
   }
 
+  // Intent routing (route-query-by-intent): "who calls X" routes to incoming CALLS
+  // and returns the caller symbols directly, not a name search over the words.
+  // c -> a CALLS, so AlphaLeaf calls Alpha.
+  const auto callers = cgraph::handle_daemon_request(
+      state, cgraph::make_request("query", {{"q", "who calls Alpha"}}));
+  const auto& callers_r = callers["result"];
+  if (callers_r.value("route", std::string{}) != "callers" || callers_r.value("of", std::string{}) != "a" ||
+      callers_r["nodes"].size() != 1 || callers_r["nodes"][0].value("label", std::string{}) != "AlphaLeaf") {
+    return 1;
+  }
+  // "what does X call" routes to outgoing CALLS. a -> b, so Alpha calls Beta.
+  const auto callees = cgraph::handle_daemon_request(
+      state, cgraph::make_request("query", {{"q", "what does Alpha call"}}));
+  const auto& callees_r = callees["result"];
+  if (callees_r.value("route", std::string{}) != "callees" || callees_r["nodes"].size() != 1 ||
+      callees_r["nodes"][0].value("label", std::string{}) != "Beta") {
+    return 1;
+  }
+  // A unique exact symbol routes to the entity result with a typed-neighbor summary.
+  // "Beta" is matched only by node b; its sole caller is "a" (a -> b CALLS).
+  const auto entity = cgraph::handle_daemon_request(state, cgraph::make_request("query", {{"q", "Beta"}}));
+  const auto& entity_r = entity["result"];
+  if (entity_r.value("route", std::string{}) != "entity" || entity_r["nodes"].size() != 1 ||
+      entity_r["nodes"][0].value("label", std::string{}) != "Beta" ||
+      entity_r["neighbors"]["callers"].value("count", 0U) != 1U ||
+      entity_r["neighbors"]["callers"]["top"][0].get<std::string>() != "a" ||
+      entity_r["neighbors"]["callees"].value("count", 1U) != 0U) {
+    return 1;
+  }
+  // A structural phrase whose operand does not resolve falls through to lexical
+  // search rather than forcing an empty typed result -- worst case is the status quo.
+  const auto fallthrough = cgraph::handle_daemon_request(
+      state, cgraph::make_request("query", {{"q", "callers of nope"}}));
+  if (fallthrough["result"].value("route", std::string{}) != "search") {
+    return 1;
+  }
+  // A name that is also a substring of other symbols stays a search (not entity):
+  // "alpha" must still return both Alpha and AlphaLeaf.
+  const auto still_search = cgraph::handle_daemon_request(
+      state, cgraph::make_request("query", {{"q", "alpha"}}));
+  if (still_search["result"].value("route", std::string{}) != "search" ||
+      still_search["result"]["nodes"].size() != 2) {
+    return 1;
+  }
+
   // Blast radius: what breaks if "b" changes? Its dependents are "a" (depth 1,
   // calls b) then "c" (depth 2, calls a). Ordered by depth.
   const auto impact = cgraph::handle_daemon_request(

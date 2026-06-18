@@ -6,9 +6,11 @@
 #include "cgraph/semantic_connectivity.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <optional>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -443,31 +445,187 @@ constexpr std::size_t kFocalSeedCount = 5;
   return best;
 }
 
+// ---- query intent routing (route-query-by-intent) ---------------------------
+
+// Neighbors of `node` reachable by one typed edge, ranked most-important-first.
+// Shared by the structural route (one relation/direction) and the entity route's
+// caller/callee/reference summary, so neither duplicates explain_node's walk.
+[[nodiscard]] std::vector<const Node*> typed_neighbors(
+    const GraphSnapshot& graph,
+    const std::unordered_map<std::string, const Node*>& by_id,
+    const Node& node, std::string_view relation, std::string_view direction) {
+  std::vector<const Node*> out;
+  for (const auto& edge : graph.edges) {
+    const bool outgoing = edge.source == node.id;
+    const bool incoming = edge.target == node.id;
+    if (!outgoing && !incoming) {
+      continue;
+    }
+    if ((direction == "out" && !outgoing) || (direction == "in" && !incoming)) {
+      continue;
+    }
+    if (!relation.empty() && edge.relation != relation) {
+      continue;
+    }
+    const auto& other = outgoing ? edge.target : edge.source;
+    if (const auto it = by_id.find(other); it != by_id.end()) {
+      out.push_back(it->second);
+    }
+  }
+  std::ranges::stable_sort(out, [](const Node* lhs, const Node* rhs) {
+    return node_centrality(*lhs) > node_centrality(*rhs);
+  });
+  return out;
+}
+
+// A compact {count, top:[id...]} summary for one neighbor bucket of the entity route.
+[[nodiscard]] nlohmann::json neighbor_summary(const std::vector<const Node*>& nodes, std::size_t top) {
+  auto ids = nlohmann::json::array();
+  for (std::size_t i = 0; i < nodes.size() && i < top; ++i) {
+    ids.push_back(nodes[i]->id);
+  }
+  return {{"count", nodes.size()}, {"top", std::move(ids)}};
+}
+
+// A structural-intent phrase ("who calls X") parses to a typed traversal plus the
+// operand symbol text. Fixed, case-insensitive grammar; an NL query essentially
+// never trips these prefixes. Relation tokens reuse the stored edge-type strings.
+struct StructuralIntent {
+  std::string relation;
+  std::string direction;    // "in" | "out"
+  std::string intent_name;  // callers | callees | references | implementations | importers
+  std::string operand;
+};
+
+[[nodiscard]] std::optional<StructuralIntent> parse_structural_phrase(const std::string& needle) {
+  struct Rule {
+    std::string_view prefix;
+    std::string_view suffix;
+    std::string_view relation;
+    std::string_view direction;
+    std::string_view name;
+  };
+  static constexpr std::array<Rule, 14> rules{{
+      {"callers of ", "", "CALLS", "in", "callers"},
+      {"who calls ", "", "CALLS", "in", "callers"},
+      {"what calls ", "", "CALLS", "in", "callers"},
+      {"callees of ", "", "CALLS", "out", "callees"},
+      {"what does ", " call", "CALLS", "out", "callees"},
+      {"references to ", "", "references", "in", "references"},
+      {"who references ", "", "references", "in", "references"},
+      {"uses of ", "", "references", "in", "references"},
+      {"implementations of ", "", "inherits", "in", "implementations"},
+      {"who implements ", "", "inherits", "in", "implementations"},
+      {"subclasses of ", "", "inherits", "in", "implementations"},
+      {"who extends ", "", "inherits", "in", "implementations"},
+      {"importers of ", "", "imports", "in", "importers"},
+      {"who imports ", "", "imports", "in", "importers"},
+  }};
+  const auto lower = ascii_lower(needle);
+  for (const auto& rule : rules) {
+    if (!lower.starts_with(rule.prefix)) {
+      continue;
+    }
+    const std::size_t begin = rule.prefix.size();
+    std::size_t end = needle.size();
+    if (!rule.suffix.empty()) {
+      if (lower.size() < rule.prefix.size() + rule.suffix.size() || !lower.ends_with(rule.suffix)) {
+        continue;
+      }
+      end = needle.size() - rule.suffix.size();
+    }
+    std::string operand = needle.substr(begin, end - begin);
+    while (!operand.empty() && (operand.back() == ' ' || operand.back() == '\t' || operand.back() == '?')) {
+      operand.pop_back();
+    }
+    while (!operand.empty() && (operand.front() == ' ' || operand.front() == '\t')) {
+      operand.erase(operand.begin());
+    }
+    if (operand.empty()) {
+      continue;
+    }
+    return StructuralIntent{std::string(rule.relation), std::string(rule.direction),
+                            std::string(rule.name), std::move(operand)};
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] nlohmann::json query_graph(const GraphSnapshot& graph, const nlohmann::json& params) {
   const auto needle = params.value("q", params.value("query", std::string{}));
+  const auto by_id = index_nodes(graph);
+  const auto limit = params.value("limit", kDefaultQueryLimit);
+  const auto kind = ascii_lower(params.value("kind", std::string{}));
+  const auto file = ascii_lower(params.value("file", std::string{}));
+
+  const auto narrow = [&](std::vector<const Node*>& set) {
+    if (!kind.empty()) {
+      std::erase_if(set, [&](const Node* node) { return ascii_lower(node->kind) != kind; });
+    }
+    if (!file.empty()) {
+      std::erase_if(set, [&](const Node* node) { return !contains_ci(node->source_file, file); });
+    }
+  };
+  const auto as_nodes = [&](std::vector<const Node*> set, std::string route,
+                            nlohmann::json extra) -> nlohmann::json {
+    narrow(set);
+    const auto total = set.size();
+    if (limit > 0 && set.size() > limit) {
+      set.resize(limit);
+    }
+    auto nodes = nlohmann::json::array();
+    for (const auto* node : set) {
+      nodes.push_back(node_brief(*node));
+    }
+    const auto returned = nodes.size();
+    nlohmann::json result{{"route", std::move(route)}, {"nodes", std::move(nodes)},
+                          {"total", total}, {"returned", returned}};
+    result.update(std::move(extra));
+    return result;
+  };
+
+  // Route 1 — a structural-intent phrase whose operand resolves: return the typed
+  // neighbor set directly (the same set explain would, filtered to that relation).
+  if (const auto intent = parse_structural_phrase(needle)) {
+    if (const Node* target = resolve_node(graph, by_id, intent->operand)) {
+      return as_nodes(typed_neighbors(graph, by_id, *target, intent->relation, intent->direction),
+                      intent->intent_name, {{"of", target->id}});
+    }
+  }
+
   auto matches = matching_nodes(graph, needle);
-  // Natural-language queries are almost never a substring of a symbol label; fall
-  // back to lexical term overlap so the query op returns relevant symbols instead
-  // of nothing. Lexical results arrive already ranked by overlap, so the
-  // centrality re-sort below is skipped for them.
+
+  // Route 2 — a whitespace-free needle that pins down exactly one symbol it equals:
+  // the entity plus a compact typed-neighbor summary, so "find X and who calls it"
+  // is one call. Guarded to a unique exact match so a name that is also a substring
+  // of other symbols (e.g. "alpha" -> Alpha, AlphaLeaf) stays a search (route 3).
+  if (!needle.empty() && needle.find_first_of(" \t") == std::string::npos && matches.size() == 1) {
+    const Node* only = matches.front();
+    const auto low = ascii_lower(needle);
+    if (only->id == needle || ascii_lower(only->label) == low ||
+        ascii_lower(label_symbol(*only)) == low) {
+      auto nodes = nlohmann::json::array();
+      nodes.push_back(node_brief(*only));
+      return {
+          {"route", "entity"},
+          {"nodes", std::move(nodes)},
+          {"neighbors",
+           {{"callers", neighbor_summary(typed_neighbors(graph, by_id, *only, "CALLS", "in"), 5)},
+            {"callees", neighbor_summary(typed_neighbors(graph, by_id, *only, "CALLS", "out"), 5)},
+            {"references", neighbor_summary(typed_neighbors(graph, by_id, *only, "references", "in"), 5)}}},
+          {"total", 1},
+          {"returned", 1}};
+    }
+  }
+
+  // Route 3 — lexical search. Natural-language queries are almost never a substring
+  // of a symbol label; fall back to lexical term overlap so the op returns relevant
+  // symbols instead of nothing. Lexical results arrive already ranked by overlap,
+  // so the centrality re-sort below is skipped for them.
   const bool lexical_fallback = matches.empty();
   if (lexical_fallback) {
     matches = lexical_matches(graph, lexical_terms(needle));
   }
-
-  // Optional narrowing: `kind` (exact, e.g. "function") and `file` (substring
-  // of the source path), both case-insensitive.
-  if (const auto kind = ascii_lower(params.value("kind", std::string{})); !kind.empty()) {
-    std::erase_if(matches, [&](const Node* node) { return ascii_lower(node->kind) != kind; });
-  }
-  if (const auto file = ascii_lower(params.value("file", std::string{})); !file.empty()) {
-    std::erase_if(matches, [&](const Node* node) { return !contains_ci(node->source_file, file); });
-  }
-
-  // Rank by importance so the most central (most-connected / god) nodes lead —
-  // an agent reading the top few results lands on the symbols that matter.
-  // Lexical-fallback matches are already ranked by query overlap; re-sorting by
-  // centrality would bury the most relevant matches under high-degree god nodes.
+  narrow(matches);
   if (!lexical_fallback) {
     std::ranges::sort(matches, [](const Node* lhs, const Node* rhs) {
       const auto lc = node_centrality(*lhs);
@@ -480,17 +638,16 @@ constexpr std::size_t kFocalSeedCount = 5;
   }
 
   const auto total = matches.size();
-  const auto limit = params.value("limit", kDefaultQueryLimit);
   if (limit > 0 && matches.size() > limit) {
     matches.resize(limit);
   }
-
   auto nodes = nlohmann::json::array();
   for (const auto* node : matches) {
     nodes.push_back(node_brief(*node));
   }
   const auto returned = nodes.size();  // capture before the move below
-  nlohmann::json result{{"nodes", std::move(nodes)}, {"total", total}, {"returned", returned}};
+  nlohmann::json result{{"route", "search"}, {"nodes", std::move(nodes)}, {"total", total},
+                        {"returned", returned}};
   if (total == 0) {
     result["suggestions"] = suggest_similar(graph, needle);
   }
