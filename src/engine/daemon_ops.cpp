@@ -635,7 +635,7 @@ constexpr std::size_t kFocalSeedCount = 5;
   // Adaptive relevance-gated gather (flag-gated, default "fixed" = unchanged): keeps
   // the full 2-hop core but expands past depth 1 only along query-relevant nodes,
   // reaching beyond 2 hops without the full 3-hop fan-out. Implies the knapsack fill.
-  const auto gather = params.value("gather", std::string{"fixed"});
+  const auto gather = params.value("gather", std::string{"adaptive"});
   const bool adaptive = gather == "adaptive";
   const double gather_theta = std::clamp(params.value("gather_theta", 0.05), 0.0, 1.0);
   const bool use_knapsack = packing == "knapsack" || adaptive;

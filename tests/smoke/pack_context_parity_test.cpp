@@ -119,8 +119,10 @@ int main() {
     double sum = 0.0;
     int n = 0;
     for (const auto& row : rows) {
+      // Pin gather=fixed: the default is now adaptive (which forces knapsack), so
+      // the greedy-vs-knapsack comparison must opt into fixed to isolate packing.
       const nlohmann::json params{
-          {"id", row.focal}, {"budget", budget}, {"packing", packing}, {"max_depth", 3}};
+          {"id", row.focal}, {"budget", budget}, {"packing", packing}, {"max_depth", 3}, {"gather", "fixed"}};
       const auto response = cgraph::handle_daemon_request(state, cgraph::make_request("context", params));
       const auto& result = response["result"];
       std::set<std::string> selected;
@@ -182,9 +184,9 @@ int main() {
     double csum = 0.0;
     int n = 0;
     for (const auto& row : rows) {
-      nlohmann::json params{{"id", row.focal}, {"budget", budget}, {"packing", packing}, {"max_depth", max_depth}};
+      nlohmann::json params{{"id", row.focal}, {"budget", budget}, {"packing", packing},
+                            {"max_depth", max_depth}, {"gather", gather}};
       if (gather == "adaptive") {
-        params["gather"] = "adaptive";
         params["gather_theta"] = 0.05;
         params["q"] = row.query;  // the gate needs the query terms
       }

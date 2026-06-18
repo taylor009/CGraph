@@ -220,16 +220,16 @@ int main() {
   }
 
   // Context packing: a generous budget bundles the focal node (with its snippet)
-  // plus its neighbors, staying within budget.
+  // plus its neighbors, staying within budget. `gather:"fixed"` is the explicit
+  // opt-out of the adaptive default and must stay byte-for-byte the old behavior.
   const auto context = cgraph::handle_daemon_request(
-      state, cgraph::make_request("context", {{"id", "a"}, {"budget", 5000}, {"max_depth", 2}}));
+      state, cgraph::make_request("context", {{"id", "a"}, {"budget", 5000}, {"max_depth", 2}, {"gather", "fixed"}}));
   const auto& ctx = context["result"];
   if (ctx["focus"].value("label", std::string{}) != "Alpha" ||
       ctx["focus"].value("snippet", std::string{}).rfind("class Alpha {", 0) != 0) {
     return 1;  // focal node leads, carrying its source
   }
-  // The default (greedy/fixed) response self-describes its mode, and carries no
-  // adaptive reach summary.
+  // Explicit fixed gather self-describes greedy/fixed and carries no reach summary.
   if (ctx.value("gather", std::string{}) != "fixed" || ctx.value("packing", std::string{}) != "greedy") {
     return 1;
   }
@@ -247,6 +247,17 @@ int main() {
     if (item.value("depth", 0) != 1) {
       return 1;
     }
+  }
+
+  // Default gather (no `gather` param) is now adaptive: it self-describes
+  // adaptive/knapsack and carries the reach summary. `fixed` is opt-in only.
+  const auto def_ctx = cgraph::handle_daemon_request(
+      state, cgraph::make_request("context", {{"id", "a"}, {"budget", 5000}}));
+  const auto& dctx = def_ctx["result"];
+  if (dctx["focus"].value("label", std::string{}) != "Alpha" ||
+      dctx.value("gather", std::string{}) != "adaptive" ||
+      dctx.value("packing", std::string{}) != "knapsack" || !dctx.contains("reach")) {
+    return 1;
   }
 
   // A budget too small for any neighbor still returns the focal node and flags
@@ -469,10 +480,11 @@ int main() {
       return ids;
     };
 
-    // Fixed gather at depth 3 (knapsack) reaches BOTH third-hop nodes.
+    // Fixed gather at depth 3 (knapsack) reaches BOTH third-hop nodes. Explicit
+    // gather:"fixed" — the default is now adaptive, which would gate the 3rd hop.
     const auto fixed = cgraph::handle_daemon_request(
         s, cgraph::make_request(
-               "context", {{"id", "F"}, {"q", "Payment"}, {"packing", "knapsack"}, {"max_depth", 3}, {"budget", 100000}}));
+               "context", {{"id", "F"}, {"q", "Payment"}, {"packing", "knapsack"}, {"max_depth", 3}, {"budget", 100000}, {"gather", "fixed"}}));
     const auto fixed_ids = ids_of(fixed["result"]);
     if (fixed_ids.count("d3a") == 0 || fixed_ids.count("d3b") == 0) {
       return 60;  // fixed 3-hop must reach both third-hop nodes
