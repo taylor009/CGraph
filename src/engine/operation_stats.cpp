@@ -160,6 +160,11 @@ nlohmann::json op_stats_json(const DaemonOpStats& stats) {
       {"context_adaptive_count", stats.adaptive_context},
       {"context_zero_hits", stats.context_zero_hits},
       {"recall_zero_hits", stats.recall_zero_hits},
+      {"not_ready", stats.not_ready},
+      {"query_routes",
+       {{"entity", stats.query_route_entity},
+        {"structural", stats.query_route_structural},
+        {"search", stats.query_route_search}}},
   };
 }
 
@@ -229,6 +234,10 @@ nlohmann::json op_stats_ledger_line(const DaemonOpStats& stats,
       {"context_zero_hits", stats.context_zero_hits},
       {"adaptive_context", stats.adaptive_context},
       {"recall_zero_hits", stats.recall_zero_hits},
+      {"not_ready", stats.not_ready},
+      {"query_route_entity", stats.query_route_entity},
+      {"query_route_structural", stats.query_route_structural},
+      {"query_route_search", stats.query_route_search},
       {"ops", std::move(ops)},
   };
 }
@@ -274,6 +283,10 @@ nlohmann::json aggregate_op_stats_ledger(const std::vector<nlohmann::json>& line
   std::size_t context_zero_hits = 0;
   std::size_t adaptive_context = 0;
   std::size_t recall_zero_hits = 0;
+  std::size_t not_ready = 0;
+  std::size_t query_route_entity = 0;
+  std::size_t query_route_structural = 0;
+  std::size_t query_route_search = 0;
   bool mixed = false;
 
   for (const auto& line : lines) {
@@ -295,6 +308,10 @@ nlohmann::json aggregate_op_stats_ledger(const std::vector<nlohmann::json>& line
     context_zero_hits += line.value("context_zero_hits", static_cast<std::size_t>(0));
     adaptive_context += line.value("adaptive_context", static_cast<std::size_t>(0));
     recall_zero_hits += line.value("recall_zero_hits", static_cast<std::size_t>(0));
+    not_ready += line.value("not_ready", static_cast<std::size_t>(0));
+    query_route_entity += line.value("query_route_entity", static_cast<std::size_t>(0));
+    query_route_structural += line.value("query_route_structural", static_cast<std::size_t>(0));
+    query_route_search += line.value("query_route_search", static_cast<std::size_t>(0));
     const auto ops = line.value("ops", nlohmann::json::object());
     for (const auto op : kSubstantiveOps) {
       const auto* name = daemon_op_name(op);
@@ -337,11 +354,17 @@ nlohmann::json aggregate_op_stats_ledger(const std::vector<nlohmann::json>& line
   ops_out["recall"]["zero_hits"] = recall_zero_hits;
   ops_out["recall"]["zero_hit_rate"] = query_zero_hit_rate(recall_count, recall_zero_hits);
 
+  // Route adoption across lifetimes, beside the query summary.
+  ops_out["query"]["routes"] = {{"entity", query_route_entity},
+                                {"structural", query_route_structural},
+                                {"search", query_route_search}};
+
   const std::size_t query_count = sum_count[static_cast<std::size_t>(DaemonOp::Query)];
   return {
       {"since", format_iso8601_utc(since)},
       {"lifetimes", lifetimes},
       {"mixed_schema_versions", mixed},
+      {"not_ready", not_ready},
       {"query",
        {{"count", query_count},
         {"zero_hits", query_zero_hits},

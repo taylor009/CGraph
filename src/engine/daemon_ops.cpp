@@ -1615,6 +1615,7 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
   // from a daemon that is answering but finding nothing.
   double latency_ms = 0.0;
   bool zero_hit = false;
+  std::string query_route;  // the query op's resolved route, for adoption telemetry
   nlohmann::json response;
   {
     ScopedTimer timer(&latency_ms);
@@ -1622,6 +1623,7 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
       case DaemonOp::Query: {
         auto result = query_graph(*graph, params);
         zero_hit = result.value("total", std::size_t{0}) == 0;
+        query_route = result.value("route", std::string{});
         response = ok_response(annotate_build_state(std::move(result), *graph));
         break;
       }
@@ -1679,7 +1681,13 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
   // durable ledger can report adaptive adoption (pre-flip telemetry).
   const bool adaptive_context_call =
       *known_op == DaemonOp::Context && params.value("gather", std::string{}) == "adaptive";
-  state.op_stats.record(*known_op, latency_ms, zero_hit, adaptive_context_call);
+  // A read served against the still-building empty snapshot is "not ready", not a
+  // miss: record it separately and keep it out of op/zero-hit/latency accounting.
+  const bool not_ready = graph->build_state == BuildState::Empty;
+  state.op_stats.record(*known_op, latency_ms, zero_hit, adaptive_context_call, not_ready);
+  if (!not_ready && *known_op == DaemonOp::Query) {
+    state.op_stats.note_query_route(query_route);
+  }
   return response;
 }
 

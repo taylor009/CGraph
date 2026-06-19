@@ -34,7 +34,7 @@ void print_usage() {
       "        emit a semantic chunk plan + manifest for hosts to enrich\n"
       "  cgraph enrich-ingest [--root PATH] [--out PATH] [--drop DIR]\n"
       "        merge host-dropped chunk_NN.json fragments and re-export\n"
-      "  cgraph stats [--root PATH] [--since today|<ISO8601>|<N>h|<N>d]\n"
+      "  cgraph stats [--root PATH] [--since all|today|<ISO8601>|<N>h|<N>d]   (default: all)\n"
       "        roll up the durable op-stats ledger (counts + zero-hit rate) and show live daemon stats\n"
       "  cgraph seam gen --seam SPEC.json --graphs NAME=graph.json [--graphs ...] --out DROPDIR\n"
       "        resolve a cross-service seam spec against consumer graphs into a contract fragment\n"
@@ -48,7 +48,7 @@ struct Args {
   std::filesystem::path root = ".";
   std::filesystem::path output = "cgraph-out";
   std::filesystem::path drop;  // empty -> default_semantic_drop_dir(output)
-  std::string since = "today";  // `stats` window: today | <ISO8601> | <N>h | <N>d
+  std::string since = "all";  // `stats` window: all (default) | today | <ISO8601> | <N>h | <N>d
 };
 
 // Parses shared flags starting at `start`. Returns false on a malformed flag.
@@ -120,6 +120,9 @@ int run_enrich_ingest(const Args& args) {
 
 // --since lower bound: today (start of current UTC day) | <ISO8601> | <N>h | <N>d.
 [[nodiscard]] std::optional<cgraph::WallClock::time_point> parse_since(const std::string& spec) {
+  if (spec == "all") {
+    return cgraph::WallClock::time_point{};  // epoch lower bound: every recorded lifetime
+  }
   if (spec == "today") {
     const std::time_t now = cgraph::WallClock::to_time_t(cgraph::WallClock::now());
     std::tm tm{};
@@ -144,7 +147,7 @@ int run_enrich_ingest(const Args& args) {
 int run_stats(const Args& args) {
   const auto since = parse_since(args.since);
   if (!since) {
-    std::cerr << "stats: bad --since '" << args.since << "' (use: today | <ISO8601> | <N>h | <N>d)\n";
+    std::cerr << "stats: bad --since '" << args.since << "' (use: all | today | <ISO8601> | <N>h | <N>d)\n";
     return 2;
   }
 

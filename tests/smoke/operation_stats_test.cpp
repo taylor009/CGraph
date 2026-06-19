@@ -357,5 +357,58 @@ int main() {
     }
   }
 
+  // --- not-ready reads are excluded from op/zero-hit/recent accounting ---
+  {
+    DaemonOpStats stats;
+    stats.record(DaemonOp::Query, 1.0, /*zero_hit=*/false);                         // ready, real
+    stats.record(DaemonOp::Query, 1.0, /*zero_hit=*/true, false, /*not_ready=*/true);  // building
+    stats.record(DaemonOp::Query, 1.0, /*zero_hit=*/true, false, /*not_ready=*/true);  // building
+    if (stats.count[static_cast<std::size_t>(DaemonOp::Query)] != 1) {
+      return 60;  // building reads excluded from the op count
+    }
+    if (stats.query_zero_hits != 0) {
+      return 61;  // a building read is never a miss
+    }
+    if (stats.not_ready != 2 || stats.recent.size() != 1) {
+      return 62;  // tracked separately; kept out of the recent window
+    }
+  }
+
+  // --- query route bucketing (entity / structural / search) ---
+  {
+    DaemonOpStats stats;
+    stats.note_query_route("entity");
+    stats.note_query_route("callers");      // structural intent name
+    stats.note_query_route("references");   // structural intent name
+    stats.note_query_route("search");
+    stats.note_query_route("");             // absent -> search
+    if (stats.query_route_entity != 1 || stats.query_route_structural != 2 ||
+        stats.query_route_search != 2) {
+      return 63;
+    }
+  }
+
+  // --- not_ready + route counts round-trip through the durable ledger ---
+  {
+    DaemonOpStats stats;
+    stats.record(DaemonOp::Query, 1.0, false);
+    stats.record(DaemonOp::Query, 1.0, false, false, /*not_ready=*/true);
+    stats.note_query_route("entity");
+    stats.note_query_route("callers");
+    const auto boot = parse_iso8601_utc("2026-06-18T00:00:00Z");
+    const auto line = op_stats_ledger_line(stats, *boot, *boot);
+    if (line.value("not_ready", std::size_t{0}) != 1 ||
+        line.value("query_route_entity", std::size_t{0}) != 1 ||
+        line.value("query_route_structural", std::size_t{0}) != 1) {
+      return 64;
+    }
+    const auto roll = aggregate_op_stats_ledger({line}, WallClock::time_point{});
+    if (roll.value("not_ready", std::size_t{0}) != 1 ||
+        roll["ops"]["query"]["routes"]["entity"] != 1 ||
+        roll["ops"]["query"]["routes"]["structural"] != 1) {
+      return 65;
+    }
+  }
+
   return 0;
 }

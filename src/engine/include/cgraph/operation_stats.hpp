@@ -147,9 +147,23 @@ struct DaemonOpStats {
   // Recall (session memory) usefulness: recalls that returned no checkpoints. Kept
   // beside context_zero_hits so the durable ledger can report the recall miss rate.
   std::size_t recall_zero_hits = 0;
+  // Reads served against the still-building empty snapshot. Counted here and
+  // EXCLUDED from op counts/zero-hits/latency so a query during a (re)build is a
+  // "not ready", not a retrieval miss -- otherwise the zero-hit rate lies during
+  // the rebuild that every logic-version bump triggers.
+  std::size_t not_ready = 0;
+  // Query route adoption (route-query-by-intent): how query-op responses resolved.
+  std::size_t query_route_entity = 0;
+  std::size_t query_route_structural = 0;
+  std::size_t query_route_search = 0;
   RollingWindow recent;
 
-  void record(DaemonOp op, double latency_ms, bool zero_hit, bool adaptive_context_call = false) {
+  void record(DaemonOp op, double latency_ms, bool zero_hit, bool adaptive_context_call = false,
+              bool not_ready_read = false) {
+    if (not_ready_read) {
+      not_ready += 1;  // building snapshot: not a real op against the graph, never a miss
+      return;
+    }
     const auto idx = static_cast<std::size_t>(op);
     count[idx] += 1;
     total_ms[idx] += latency_ms;
@@ -169,6 +183,19 @@ struct DaemonOpStats {
       recall_zero_hits += 1;
     }
     recent.record(RecentOp{op, latency_ms, zero_hit});
+  }
+
+  // Bucket a query op's `route` (route-query-by-intent) for adoption telemetry:
+  // "entity" -> entity, "search"/absent -> search, any structural intent name
+  // (callers/callees/references/...) -> structural. Call only for ready reads.
+  void note_query_route(std::string_view route) {
+    if (route == "entity") {
+      query_route_entity += 1;
+    } else if (route.empty() || route == "search") {
+      query_route_search += 1;
+    } else {
+      query_route_structural += 1;
+    }
   }
 
   // True when >=1 substantive op (query/path/explain/impact/context/remember/recall)
