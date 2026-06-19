@@ -594,15 +594,31 @@ struct StructuralIntent {
 
   auto matches = matching_nodes(graph, needle);
 
-  // Route 2 — a whitespace-free needle that pins down exactly one symbol it equals:
-  // the entity plus a compact typed-neighbor summary, so "find X and who calls it"
-  // is one call. Guarded to a unique exact match so a name that is also a substring
-  // of other symbols (e.g. "alpha" -> Alpha, AlphaLeaf) stays a search (route 3).
-  if (!needle.empty() && needle.find_first_of(" \t") == std::string::npos && matches.size() == 1) {
-    const Node* only = matches.front();
+  // Route 2 — a whitespace-free needle that names exactly one symbol: return that
+  // entity plus a compact typed-neighbor summary, so "find X and who calls it" is one
+  // call. The gate is a unique *exact* match (id / label / leading label symbol),
+  // counted independently of substring neighbors. A name that equals no symbol but is
+  // a substring of several (e.g. "pha" -> Alpha, AlphaLeaf) stays a search (route 3),
+  // and a name several symbols share (same type in N files) is ambiguous and also stays
+  // a search -- but a precise symbol like "HandlerCtx" still routes to entity even on a
+  // large graph where its token collides as a substring of many other ids/labels.
+  // Every exact match is necessarily in `matches` (a string contains itself), so the
+  // substring set is a complete candidate pool to filter.
+  if (!needle.empty() && needle.find_first_of(" \t") == std::string::npos) {
     const auto low = ascii_lower(needle);
-    if (only->id == needle || ascii_lower(only->label) == low ||
-        ascii_lower(label_symbol(*only)) == low) {
+    const auto is_exact = [&](const Node* node) {
+      return node->id == needle || ascii_lower(node->label) == low ||
+             ascii_lower(label_symbol(*node)) == low;
+    };
+    const Node* only = nullptr;
+    std::size_t exact_count = 0;
+    for (const Node* node : matches) {
+      if (is_exact(node)) {
+        ++exact_count;
+        only = node;
+      }
+    }
+    if (exact_count == 1) {
       auto nodes = nlohmann::json::array();
       nodes.push_back(node_brief(*only));
       return {
