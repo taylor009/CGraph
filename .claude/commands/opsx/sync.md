@@ -3,6 +3,7 @@ name: "OPSX: Sync"
 description: Sync delta specs from a change to main specs
 category: Workflow
 tags: [workflow, specs, experimental]
+model: sonnet  # mechanical artifact work; cost routing (reduce-opus-cost-routing)
 ---
 
 Sync delta specs from a change to main specs.

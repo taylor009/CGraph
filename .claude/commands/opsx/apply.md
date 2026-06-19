@@ -3,6 +3,7 @@ name: "OPSX: Apply"
 description: Implement tasks from an OpenSpec change (Experimental)
 category: Workflow
 tags: [workflow, artifacts, experimental]
+model: inherit  # deliberate: parity-critical implementation keeps the session model (reduce-opus-cost-routing)
 ---
 
 Implement tasks from an OpenSpec change.

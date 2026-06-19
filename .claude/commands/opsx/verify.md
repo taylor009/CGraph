@@ -3,6 +3,7 @@ name: "OPSX: Verify"
 description: Verify implementation matches change artifacts before archiving
 category: Workflow
 tags: [workflow, verify, experimental]
+model: sonnet  # mechanical artifact work; cost routing (reduce-opus-cost-routing)
 ---
 
 Verify that an implementation matches the change artifacts (specs, tasks, design).

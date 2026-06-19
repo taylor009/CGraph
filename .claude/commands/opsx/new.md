@@ -3,6 +3,7 @@ name: "OPSX: New"
 description: Start a new change using the experimental artifact workflow (OPSX)
 category: Workflow
 tags: [workflow, artifacts, experimental]
+model: sonnet  # scaffolding/templated; cost routing (reduce-opus-cost-routing)
 ---
 
 Start a new change using the experimental artifact-driven approach.

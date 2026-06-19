@@ -3,6 +3,7 @@ name: "OPSX: Explore"
 description: "Enter explore mode - think through ideas, investigate problems, clarify requirements"
 category: Workflow
 tags: [workflow, explore, experimental, thinking]
+model: inherit  # deliberate: architectural reasoning keeps the session model (reduce-opus-cost-routing)
 ---
 
 Enter explore mode. Think deeply. Visualize freely. Follow the conversation wherever it goes.
