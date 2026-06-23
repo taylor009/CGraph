@@ -83,5 +83,55 @@ int main() {
     return 1;
   }
 
+  // Schema-qualified refs (`"public"."Project"`) must key on the TABLE, not the
+  // schema -- otherwise every FK collapses to a dangling edge to a phantom
+  // `sql_table:public`. Owner is qualified, CREATE TABLE is not: the edge endpoints
+  // must still match the unqualified table node ids.
+  const auto sql3 = cgraph::extract_sql(cgraph::ExtractionContext{
+      .source_file = "prisma/migrations/20210202_qualified/migration.sql",
+      .source = "CREATE TABLE \"Brand\" (id TEXT);\n"
+                "CREATE TABLE \"Project\" (id TEXT);\n"
+                "ALTER TABLE \"public\".\"Brand\" ADD CONSTRAINT \"fk\" "
+                "FOREIGN KEY(\"projectId\") REFERENCES \"public\".\"Project\"(\"id\");",
+  });
+  const auto* brand3 = find(sql3.fragment, "sql_table", "Brand");
+  const auto* project3 = find(sql3.fragment, "sql_table", "Project");
+  if (brand3 == nullptr || project3 == nullptr) {
+    return 1;
+  }
+  // No phantom `public` table node, and exactly the Brand -> Project edge.
+  if (find(sql3.fragment, "sql_table", "public") != nullptr) {
+    return 1;
+  }
+  if (sql3.fragment.edges.size() != 1 || sql3.fragment.edges[0].source != brand3->id ||
+      sql3.fragment.edges[0].target != project3->id) {
+    return 1;
+  }
+
+  // `ALTER TABLE RENAME TO` mints the new table identity so a later FK to the new
+  // name resolves; without it the reference dangles to a non-existent node.
+  const auto sql4 = cgraph::extract_sql(cgraph::ExtractionContext{
+      .source_file = "prisma/migrations/20210303_rename/migration.sql",
+      .source = "CREATE TABLE \"Objective\" (id TEXT);\n"
+                "ALTER TABLE \"Objective\" RENAME TO \"CategoryObjective\";\n"
+                "CREATE TABLE \"Tag\" (id TEXT);\n"
+                "ALTER TABLE \"Tag\" ADD FOREIGN KEY(\"objId\") REFERENCES \"CategoryObjective\"(\"id\");",
+  });
+  const auto* renamed = find(sql4.fragment, "sql_table", "CategoryObjective");
+  const auto* tag = find(sql4.fragment, "sql_table", "Tag");
+  if (renamed == nullptr || tag == nullptr) {
+    return 1;
+  }
+  // The FK edge targets the renamed-to table node (no dangling endpoint).
+  bool found_edge = false;
+  for (const auto& edge : sql4.fragment.edges) {
+    if (edge.source == tag->id && edge.target == renamed->id) {
+      found_edge = true;
+    }
+  }
+  if (!found_edge) {
+    return 1;
+  }
+
   return 0;
 }

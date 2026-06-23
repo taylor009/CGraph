@@ -197,17 +197,33 @@ ExtractionResult extract_sql(const ExtractionContext& context) {
           });
         }
       };
+  // An optional `"schema".` qualifier is skipped so `"public"."Users"` keys on the
+  // table (`Users`), matching the unqualified node id that a bare `CREATE TABLE
+  // "Users"` produces -- otherwise schema-qualified refs key on the schema name.
   add_entity(
-      std::regex{R"rx(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"([^"]+)")rx", std::regex::icase},
+      std::regex{R"rx(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"[^"]+"\s*\.\s*)?"([^"]+)")rx",
+                 std::regex::icase},
       "sql_table", "sql_table:");
   add_entity(std::regex{R"rx(CREATE\s+TYPE\s+"([^"]+)"\s+AS\s+ENUM)rx", std::regex::icase},
              "sql_enum", "sql_enum:");
+  // `ALTER TABLE "old" RENAME TO "new"` mints a new table identity the later schema
+  // (and its foreign keys) references; key on the NEW name so those refs resolve
+  // instead of dangling. The old name keeps its own CREATE-defined node.
+  add_entity(
+      std::regex{
+          R"rx(ALTER\s+TABLE\s+(?:"[^"]+"\s*\.\s*)?"[^"]+"\s+RENAME\s+TO\s+(?:"[^"]+"\s*\.\s*)?"([^"]+)")rx",
+          std::regex::icase},
+      "sql_table", "sql_table:");
 
   // Foreign keys -> table->table `references` edges (reusing the existing relation
   // so impact / typed explain / query routing operate over the schema). Matches the
   // Prisma form `ALTER TABLE "X" ADD [CONSTRAINT "c"] FOREIGN KEY (...) REFERENCES "Y"`.
+  // Both the owner and the referenced table may be schema-qualified (`"public"."Y"`);
+  // the optional `"schema".` prefix is skipped so the edge keys on the table, aligning
+  // with the table node ids -- without this, `REFERENCES "public"."Y"` produced a
+  // dangling edge to a phantom `sql_table:public`.
   const std::regex fk{
-      R"rx(ALTER\s+TABLE\s+"([^"]+)"\s+ADD\s+(?:CONSTRAINT\s+"[^"]+"\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+"([^"]+)")rx",
+      R"rx(ALTER\s+TABLE\s+(?:"[^"]+"\s*\.\s*)?"([^"]+)"\s+ADD\s+(?:CONSTRAINT\s+"[^"]+"\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+(?:"[^"]+"\s*\.\s*)?"([^"]+)")rx",
       std::regex::icase};
   const auto end = std::cregex_iterator();
   for (auto it = std::cregex_iterator(source.data(), source.data() + source.size(), fk); it != end;
