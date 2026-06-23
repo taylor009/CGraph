@@ -133,5 +133,78 @@ int main() {
     return 1;
   }
 
+  // Unquoted DDL: tables, enums, and FKs declared without double quotes are
+  // extracted just like the quoted form (Postgres folds unquoted names to lower).
+  const auto sql5 = cgraph::extract_sql(cgraph::ExtractionContext{
+      .source_file = "db/migrations/0050_unquoted.sql",
+      .source = "CREATE TYPE status AS ENUM ('on','off');\n"
+                "CREATE TABLE IF NOT EXISTS skills (id UUID);\n"
+                "CREATE TABLE IF NOT EXISTS organizations (id UUID);\n"
+                "ALTER TABLE skills ADD CONSTRAINT skills_org_fk "
+                "FOREIGN KEY (org_id) REFERENCES organizations(id);",
+  });
+  const auto* skills = find(sql5.fragment, "sql_table", "skills");
+  const auto* orgs = find(sql5.fragment, "sql_table", "organizations");
+  const auto* status_enum = find(sql5.fragment, "sql_enum", "status");
+  if (skills == nullptr || orgs == nullptr || status_enum == nullptr) {
+    return 1;
+  }
+  // `IF NOT EXISTS` must not be captured as a table name.
+  if (find(sql5.fragment, "sql_table", "if") != nullptr ||
+      find(sql5.fragment, "sql_table", "exists") != nullptr) {
+    return 1;
+  }
+  if (sql5.fragment.edges.size() != 1 || sql5.fragment.edges[0].source != skills->id ||
+      sql5.fragment.edges[0].target != orgs->id) {
+    return 1;
+  }
+
+  // Mixed reconciliation: a table defined unquoted is referenced quoted (and vice
+  // versa); both resolve to the single existing node id, no dangling endpoint.
+  const auto sql6 = cgraph::extract_sql(cgraph::ExtractionContext{
+      .source_file = "db/migrations/0051_mixed.sql",
+      .source = "CREATE TABLE accounts (id UUID);\n"          // unquoted def
+                "CREATE TABLE \"sessions\" (id UUID);\n"      // quoted def
+                "ALTER TABLE sessions ADD FOREIGN KEY (acct) REFERENCES \"accounts\"(id);\n"
+                "ALTER TABLE \"accounts\" ADD FOREIGN KEY (sess) REFERENCES sessions(id);",
+  });
+  const auto* accounts = find(sql6.fragment, "sql_table", "accounts");
+  const auto* sessions = find(sql6.fragment, "sql_table", "sessions");
+  if (accounts == nullptr || sessions == nullptr) {
+    return 1;
+  }
+  // Exactly the two FK edges, both with endpoints among the two real node ids.
+  if (sql6.fragment.edges.size() != 2) {
+    return 1;
+  }
+  for (const auto& edge : sql6.fragment.edges) {
+    const bool ok = (edge.source == sessions->id && edge.target == accounts->id) ||
+                    (edge.source == accounts->id && edge.target == sessions->id);
+    if (!ok) {
+      return 1;
+    }
+  }
+
+  // Case reconciliation: node ids are case-folded by make_id (the Graphify id
+  // contract), so a quoted "Users" reference and an unquoted users definition resolve
+  // to the SAME node id -- the FK does not dangle. (Case-variant identifiers cannot be
+  // distinct nodes under this contract; that is a deliberate parity property, not a
+  // SQL-extractor concern.)
+  const auto sql7 = cgraph::extract_sql(cgraph::ExtractionContext{
+      .source_file = "db/migrations/0052_case.sql",
+      .source = "CREATE TABLE users (id UUID);\n"
+                "CREATE TABLE refs (id UUID);\n"
+                "ALTER TABLE refs ADD FOREIGN KEY (u) REFERENCES \"Users\"(id);",
+  });
+  const auto* users_def = find(sql7.fragment, "sql_table", "users");
+  const auto* refs = find(sql7.fragment, "sql_table", "refs");
+  if (users_def == nullptr || refs == nullptr) {
+    return 1;
+  }
+  if (sql7.fragment.edges.size() != 1 || sql7.fragment.edges[0].source != refs->id ||
+      sql7.fragment.edges[0].target != users_def->id) {
+    return 1;
+  }
+
   return 0;
 }

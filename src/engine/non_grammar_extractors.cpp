@@ -4,12 +4,42 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <regex>
 #include <string>
 #include <string_view>
 
 namespace cgraph {
 namespace {
+
+// A SQL identifier as written in DDL: a double-quoted name or a bare unquoted name.
+// Captured WITH any surrounding quotes so normalize_sql_ident can apply the right
+// case rule. `$` is legal in PostgreSQL identifiers after the first character.
+constexpr const char* kSqlIdent = R"(("[^"]+"|[A-Za-z_][A-Za-z0-9_$]*))";
+// Same, non-capturing -- for positions we match but do not key on (old rename name,
+// constraint name, schema qualifier).
+constexpr const char* kSqlIdentNc = R"((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*))";
+// An optional `schema.` qualifier (quoted or unquoted), discarded so ids key on the
+// table component -- `"public"."Users"` and `public.users` key on the table.
+constexpr const char* kSqlQualifier =
+    R"((?:(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*)?)";
+
+// Resolve a raw DDL identifier token to its canonical name: strip the surrounding
+// quotes of a quoted identifier (case preserved); fold an unquoted identifier to
+// lowercase per PostgreSQL. This canonicalizes the node LABEL; node ids go on through
+// make_id, which case-folds (the Graphify id contract), so quoted and unquoted
+// references to the same table already reconcile to one id -- case-variant identifiers
+// are therefore one node, a deliberate parity property of the id scheme.
+[[nodiscard]] std::string normalize_sql_ident(const std::string& raw) {
+  if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
+    return raw.substr(1, raw.size() - 2);
+  }
+  std::string folded = raw;
+  std::transform(folded.begin(), folded.end(), folded.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return folded;
+}
 
 [[nodiscard]] SourceLocation line_location(std::string_view source, std::size_t offset) {
   std::uint32_t line = 1;
@@ -183,7 +213,7 @@ ExtractionResult extract_sql(const ExtractionContext& context) {
         for (auto it = std::cregex_iterator(source.data(), source.data() + source.size(), pattern);
              it != end; ++it) {
           const auto& match = *it;
-          std::string name = match[1].str();
+          std::string name = normalize_sql_ident(match[1].str());
           if (name.empty()) {
             continue;
           }
@@ -197,40 +227,41 @@ ExtractionResult extract_sql(const ExtractionContext& context) {
           });
         }
       };
-  // An optional `"schema".` qualifier is skipped so `"public"."Users"` keys on the
-  // table (`Users`), matching the unqualified node id that a bare `CREATE TABLE
-  // "Users"` produces -- otherwise schema-qualified refs key on the schema name.
+  // Identifiers may be quoted or unquoted, and optionally `schema.`-qualified. The
+  // qualifier is skipped so `"public"."Users"` / `public.users` key on the table; the
+  // captured token keeps its quotes so normalize_sql_ident applies PostgreSQL case
+  // folding (quoted preserves case, unquoted lowercases) -- this is what lets a quoted
+  // definition and an unquoted reference of the same table reconcile to one node id.
+  const std::string ident = kSqlIdent;
+  const std::string ident_nc = kSqlIdentNc;
+  const std::string qual = kSqlQualifier;
   add_entity(
-      std::regex{R"rx(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"[^"]+"\s*\.\s*)?"([^"]+)")rx",
-                 std::regex::icase},
+      std::regex{R"(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)" + qual + ident, std::regex::icase},
       "sql_table", "sql_table:");
-  add_entity(std::regex{R"rx(CREATE\s+TYPE\s+"([^"]+)"\s+AS\s+ENUM)rx", std::regex::icase},
+  add_entity(std::regex{R"(CREATE\s+TYPE\s+)" + qual + ident + R"(\s+AS\s+ENUM)", std::regex::icase},
              "sql_enum", "sql_enum:");
-  // `ALTER TABLE "old" RENAME TO "new"` mints a new table identity the later schema
-  // (and its foreign keys) references; key on the NEW name so those refs resolve
-  // instead of dangling. The old name keeps its own CREATE-defined node.
-  add_entity(
-      std::regex{
-          R"rx(ALTER\s+TABLE\s+(?:"[^"]+"\s*\.\s*)?"[^"]+"\s+RENAME\s+TO\s+(?:"[^"]+"\s*\.\s*)?"([^"]+)")rx",
-          std::regex::icase},
-      "sql_table", "sql_table:");
+  // `ALTER TABLE old RENAME TO new` mints a new table identity the later schema (and
+  // its foreign keys) references; key on the NEW name so those refs resolve instead of
+  // dangling. The old name keeps its own CREATE-defined node.
+  add_entity(std::regex{R"(ALTER\s+TABLE\s+)" + qual + ident_nc + R"(\s+RENAME\s+TO\s+)" + qual +
+                            ident,
+                        std::regex::icase},
+             "sql_table", "sql_table:");
 
-  // Foreign keys -> table->table `references` edges (reusing the existing relation
-  // so impact / typed explain / query routing operate over the schema). Matches the
-  // Prisma form `ALTER TABLE "X" ADD [CONSTRAINT "c"] FOREIGN KEY (...) REFERENCES "Y"`.
-  // Both the owner and the referenced table may be schema-qualified (`"public"."Y"`);
-  // the optional `"schema".` prefix is skipped so the edge keys on the table, aligning
-  // with the table node ids -- without this, `REFERENCES "public"."Y"` produced a
-  // dangling edge to a phantom `sql_table:public`.
-  const std::regex fk{
-      R"rx(ALTER\s+TABLE\s+(?:"[^"]+"\s*\.\s*)?"([^"]+)"\s+ADD\s+(?:CONSTRAINT\s+"[^"]+"\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+(?:"[^"]+"\s*\.\s*)?"([^"]+)")rx",
-      std::regex::icase};
+  // Foreign keys -> table->table `references` edges (reusing the existing relation so
+  // impact / typed explain / query routing operate over the schema). Matches the
+  // Prisma form `ALTER TABLE X ADD [CONSTRAINT c] FOREIGN KEY (...) REFERENCES Y` for
+  // quoted and unquoted, optionally schema-qualified, X and Y.
+  const std::regex fk{R"(ALTER\s+TABLE\s+)" + qual + ident + R"(\s+ADD\s+(?:CONSTRAINT\s+)" +
+                          ident_nc + R"(\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+)" + qual +
+                          ident,
+                      std::regex::icase};
   const auto end = std::cregex_iterator();
   for (auto it = std::cregex_iterator(source.data(), source.data() + source.size(), fk); it != end;
        ++it) {
     const auto& match = *it;
-    const std::string owner = match[1].str();
-    const std::string target = match[2].str();
+    const std::string owner = normalize_sql_ident(match[1].str());
+    const std::string target = normalize_sql_ident(match[2].str());
     if (owner.empty() || target.empty()) {
       continue;
     }
