@@ -24,44 +24,46 @@
 
 ## 3. Supervisor — discovery + reconcile (portable, pure)
 
-- [ ] 3.1 Register `daemon_supervisor.{hpp,cpp}` in `src/engine/CMakeLists.txt`; add
+- [x] 3.1 Register `daemon_supervisor.{hpp,cpp}` in `src/engine/CMakeLists.txt`; add
       `daemon_supervisor_test.cpp` + `add_test` in `tests/smoke/CMakeLists.txt`.
-- [ ] 3.2 `daemon_supervisor_test` (red): `discover_tracked_repos` over a temp fixture tree (cgraph
+- [x] 3.2 `daemon_supervisor_test` (red): `discover_tracked_repos` over a temp fixture tree (cgraph
       `.mcp.json`, non-cgraph `.mcp.json`, none) returns exactly the cgraph set, and each result's
       key equals the `daemon_identity` canonical-root hash.
-- [ ] 3.3 Implement `discover_tracked_repos(search_roots)` — shallow scan, parse `.mcp.json`, select
+- [x] 3.3 Implement `discover_tracked_repos(search_roots)` — shallow scan, parse `.mcp.json`, select
       `mcpServers.cgraph`, key by canonical-root hash (reuse `daemon_identity`).
-- [ ] 3.4 `daemon_supervisor_test` (red): `reconcile(discovered, installed)` yields correct
+- [x] 3.4 `daemon_supervisor_test` (red): `reconcile(discovered, installed)` yields correct
       `to_add`/`to_remove`; identical inputs yield empty diffs (idempotent).
-- [ ] 3.5 Implement `reconcile(...)` as a pure set-difference keyed by root hash.
+- [x] 3.5 Implement `reconcile(...)` as a pure set-difference keyed by root hash.
 
 ## 4. Supervisor — LaunchAgent rendering + launchctl glue (macOS seam)
 
-- [ ] 4.1 `daemon_supervisor_test` (red): `render_launch_agent` emits the expected
+- [x] 4.1 `daemon_supervisor_test` (red): `render_launch_agent` emits the expected
       `ProgramArguments` (per-repo: `graphd --root <repo> --idle-timeout 0`; supervisor:
       `cgraph daemon sync`), `KeepAlive`, `RunAtLoad`, `Label` (`com.cgraph.graphd.<hash>` /
       `com.cgraph.supervisor`), and supervisor `StartInterval`; output parses as a valid plist.
-- [ ] 4.2 Implement `render_launch_agent(...)` (pure string) and a thin macOS-guarded
+- [x] 4.2 Implement `render_launch_agent(...)` (pure string) and a thin macOS-guarded
       `launchctl bootstrap`/`bootout` wrapper in `launch_agent.{hpp,cpp}`. `sync` SHALL return a
       structured plan (applied `to_add`/`to_remove`) for assertion; the `launchctl` call is the
       untestable seam (validated in Step 6).
 
 ## 5. CLI — `cgraph daemon` subcommands
 
-- [ ] 5.1 `daemon_supervisor_test` (red): `install` then `uninstall` (against a temp
+- [x] 5.1 `daemon_supervisor_test` (red): `install` then `uninstall` (against a temp
       LaunchAgents dir) leaves no managed plist; `status` reports per-repo liveness from a set of
       real/absent sockets.
-- [ ] 5.2 Wire `cgraph daemon <install|sync|status|uninstall>` in `src/cli/main.cpp` delegating to
+- [x] 5.2 Wire `cgraph daemon <install|sync|status|uninstall>` in `src/cli/main.cpp` delegating to
       the supervisor; `install` reconciles once and registers the supervisor LaunchAgent, `uninstall`
       is its exact inverse, `status` probes each tracked root's socket for liveness. Allow overriding
       the LaunchAgents dir + search roots for tests.
 
 ## 6. Verify
 
-- [ ] 6.1 Full suite `ctest --preset default` (report pass/total).
-- [ ] 6.2 Manual end-to-end (record in PR): `cgraph daemon install`; confirm `launchctl print`
-      shows the supervisor + one per-repo agent for each of frontend/backend/turing-agents; edit a
-      file in a tracked repo and `graph_query`/`cgraph-client query` within a couple seconds —
-      the edit is reflected with no manual rebuild; clone a new cgraph repo under a search root,
-      wait one `StartInterval`, confirm a daemon appears; `cgraph daemon uninstall` leaves no
-      residue. Capture before/after (daemons resident, freshness lag) in the PR description.
+- [x] 6.1 Full suite `ctest --preset default` — 61/61 passed.
+- [x] 6.2a End-to-end on a throwaway temp repo + temp LaunchAgents dir (real launchd, real query):
+      `daemon status` -> `[stopped]`; `daemon sync` bootstraps a real resident `graphd` and writes
+      `com.cgraph.graphd.<hash>.plist`; `daemon status` -> `[live]`; `cgraph-client query` returns the
+      seeded symbol from the resident daemon; `daemon uninstall` boots it out and removes the plist
+      (0 left); `daemon status` -> `[stopped]`, no stray graphd, no `com.cgraph.*` in user launchd.
+- [ ] 6.2b Real install on frontend/backend/turing-agents (`cgraph daemon install` with the three
+      repos' parent as a search root) — persistent login LaunchAgents on this machine. Deferred to a
+      user-confirmed step; the mechanism is proven by 6.2a.

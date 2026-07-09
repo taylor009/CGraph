@@ -3,9 +3,11 @@
 #include "cgraph/daemon_lifecycle.hpp"
 #include "cgraph/daemon_ops.hpp"
 #include "cgraph/daemon_server.hpp"
+#include "cgraph/daemon_supervisor.hpp"
 #include "cgraph/engine.hpp"
 #include "cgraph/export_json.hpp"
 #include "cgraph/fragment_json.hpp"
+#include "cgraph/launch_agent.hpp"
 #include "cgraph/operation_stats.hpp"
 #include "cgraph/pipeline.hpp"
 #include "cgraph/protocol.hpp"
@@ -24,6 +26,13 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <vector>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
+
 namespace {
 
 void print_usage() {
@@ -41,7 +50,9 @@ void print_usage() {
       "  cgraph seam fuse --seam SEAM.json --graph NAME=graph.json [--graph ...] --out DIR\n"
       "        merge a seam fragment + service graphs into a clustered graph.json + graph.html view\n"
       "  cgraph seam query --graph FUSED.json <query|path|explain|impact|context> [PARAMS_JSON]\n"
-      "        run a read op against a fused seam graph (cross-service); read-only\n";
+      "        run a read op against a fused seam graph (cross-service); read-only\n"
+      "  cgraph daemon <install|sync|status|uninstall> [--search-root DIR] [--exclude DIR]\n"
+      "        keep a resident, auto-refreshing graphd per tracked repo (login LaunchAgents)\n";
 }
 
 struct Args {
@@ -410,6 +421,172 @@ int run_seam_query(int argc, char** argv) {
   return response.value("ok", false) ? 0 : 1;
 }
 
+// Absolute path to the running cgraph binary, so generated LaunchAgents reference
+// it (and its sibling graphd) by absolute path regardless of how it was invoked.
+std::filesystem::path current_executable_path(const char* argv0) {
+#if defined(__APPLE__)
+  uint32_t size = 0;
+  _NSGetExecutablePath(nullptr, &size);
+  std::vector<char> buffer(size);
+  if (_NSGetExecutablePath(buffer.data(), &size) == 0) {
+    std::error_code ec;
+    auto p = std::filesystem::weakly_canonical(std::filesystem::path(buffer.data()), ec);
+    if (!ec) {
+      return p;
+    }
+  }
+#elif defined(__linux__)
+  std::error_code ec;
+  auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
+  if (!ec) {
+    return p;
+  }
+#endif
+  std::error_code ec;
+  return std::filesystem::weakly_canonical(std::filesystem::path(argv0), ec);
+}
+
+// graphd lives next to cgraph (installed layout) or under ../daemon/ (build tree).
+std::filesystem::path resolve_graphd_binary(const std::filesystem::path& self) {
+  const auto bin_dir = self.parent_path();
+  for (const auto& candidate : {bin_dir / "graphd", bin_dir.parent_path() / "daemon" / "graphd"}) {
+    std::error_code ec;
+    if (std::filesystem::exists(candidate, ec)) {
+      return std::filesystem::weakly_canonical(candidate, ec);
+    }
+  }
+  return bin_dir / "graphd";  // best guess; sync will report if it never comes up
+}
+
+std::filesystem::path supervisor_config_path() {
+  if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg != nullptr && xdg[0] != '\0') {
+    return std::filesystem::path(xdg) / "cgraph" / "supervisor.json";
+  }
+  if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+    return std::filesystem::path(home) / ".config" / "cgraph" / "supervisor.json";
+  }
+  return {};
+}
+
+// Builds the supervisor config from the optional JSON config file plus CLI flags.
+// Config file: {"search_roots": [..], "exclude": [..]}. Flags: --search-root PATH
+// (repeatable), --exclude PATH, --launch-agents-dir DIR, --graphd PATH,
+// --cgraph PATH, --interval SECONDS. Returns false on a malformed flag.
+[[nodiscard]] bool load_supervisor_config(int argc, char** argv, const char* argv0, cgraph::SupervisorConfig& config) {
+  config.launch_agents_dir = cgraph::default_launch_agents_dir();
+  const auto self = current_executable_path(argv0);
+  config.cgraph_binary = self;
+  config.graphd_binary = resolve_graphd_binary(self);
+
+  if (const auto path = supervisor_config_path(); !path.empty()) {
+    std::ifstream in(path);
+    if (in) {
+      auto parsed = nlohmann::json::parse(in, nullptr, /*allow_exceptions=*/false);
+      if (!parsed.is_discarded() && parsed.is_object()) {
+        for (const auto& r : parsed.value("search_roots", nlohmann::json::array())) {
+          if (r.is_string()) {
+            config.search_roots.emplace_back(r.get<std::string>());
+          }
+        }
+        for (const auto& e : parsed.value("exclude", nlohmann::json::array())) {
+          if (e.is_string()) {
+            config.exclude.emplace_back(e.get<std::string>());
+          }
+        }
+      }
+    }
+  }
+
+  for (int index = 3; index < argc; ++index) {
+    const std::string arg = argv[index];
+    if (arg == "--search-root" && index + 1 < argc) {
+      config.search_roots.emplace_back(argv[++index]);
+    } else if (arg == "--exclude" && index + 1 < argc) {
+      config.exclude.emplace_back(argv[++index]);
+    } else if (arg == "--launch-agents-dir" && index + 1 < argc) {
+      config.launch_agents_dir = argv[++index];
+    } else if (arg == "--graphd" && index + 1 < argc) {
+      config.graphd_binary = argv[++index];
+    } else if (arg == "--cgraph" && index + 1 < argc) {
+      config.cgraph_binary = argv[++index];
+    } else if (arg == "--interval" && index + 1 < argc) {
+      config.reconcile_interval_seconds = std::stoi(argv[++index]);
+    } else {
+      std::cerr << "cgraph daemon: unknown argument: " << arg << '\n';
+      return false;
+    }
+  }
+  return true;
+}
+
+// cgraph daemon <install|sync|status|uninstall> [flags]
+int run_daemon_command(int argc, char** argv) {
+  const std::string sub = argc >= 3 ? argv[2] : "";
+  if (sub != "install" && sub != "sync" && sub != "status" && sub != "uninstall") {
+    std::cerr << "usage: cgraph daemon <install|sync|status|uninstall> "
+                 "[--search-root DIR] [--exclude DIR] [--launch-agents-dir DIR] "
+                 "[--graphd PATH] [--cgraph PATH] [--interval SECONDS]\n";
+    return 2;
+  }
+
+  cgraph::SupervisorConfig config;
+  if (!load_supervisor_config(argc, argv, argv[0], config)) {
+    return 2;
+  }
+
+  if (sub == "status") {
+    const auto rows = cgraph::supervisor_status(config);
+    std::cout << "tracked repos (" << rows.size() << ")\n";
+    for (const auto& row : rows) {
+      std::cout << "  " << (row.daemon_live ? "[live]   " : "[stopped]") << " " << row.repo.root.string() << '\n';
+    }
+    if (rows.empty()) {
+      std::cout << "  (none — configure search roots in " << supervisor_config_path().string()
+                << " or pass --search-root DIR)\n";
+    }
+    return 0;
+  }
+
+  if (config.search_roots.empty()) {
+    std::cerr << "cgraph daemon " << sub << ": no search roots configured. Add them to "
+              << supervisor_config_path().string() << " or pass --search-root DIR.\n";
+    return 2;
+  }
+
+  if (sub == "sync") {
+    const auto result = cgraph::supervisor_sync(config, /*apply=*/true);
+    std::cout << "sync: +" << result.plan.to_add.size() << " daemon(s), -"
+              << result.plan.to_remove.size() << " removed\n";
+    for (const auto& repo : result.plan.to_add) {
+      std::cout << "  + " << repo.root.string() << '\n';
+    }
+    for (const auto& hash : result.plan.to_remove) {
+      std::cout << "  - " << hash << '\n';
+    }
+    for (const auto& label : result.failed) {
+      std::cerr << "  FAILED: " << label << '\n';
+    }
+    return result.failed.empty() ? 0 : 1;
+  }
+
+  if (sub == "install") {
+    if (!cgraph::supervisor_install(config)) {
+      std::cerr << "cgraph daemon install: failed (check launchctl and binary paths)\n";
+      return 1;
+    }
+    std::cout << "installed supervisor (" << cgraph::kSupervisorLabel << ") + per-repo daemons\n";
+    return 0;
+  }
+
+  // uninstall
+  if (!cgraph::supervisor_uninstall(config)) {
+    std::cerr << "cgraph daemon uninstall: some plists could not be removed\n";
+    return 1;
+  }
+  std::cout << "uninstalled supervisor and all managed daemons\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -450,6 +627,9 @@ int main(int argc, char** argv) {
       }
       std::cerr << "usage: cgraph seam <gen|fuse|query> ...\n";
       return 2;
+    }
+    if (first == "daemon") {
+      return run_daemon_command(argc, argv);
     }
   }
 

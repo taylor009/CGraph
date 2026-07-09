@@ -1,0 +1,143 @@
+#include "cgraph/daemon_identity.hpp"
+#include "cgraph/daemon_supervisor.hpp"
+#include "cgraph/launch_agent.hpp"
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+
+namespace {
+
+namespace fs = std::filesystem;
+
+void expect(bool& ok, bool condition, const char* what) {
+  if (!condition) {
+    std::cerr << "FAIL: " << what << '\n';
+    ok = false;
+  }
+}
+
+void write_file(const fs::path& path, const std::string& contents) {
+  fs::create_directories(path.parent_path());
+  std::ofstream(path) << contents;
+}
+
+bool contains(const std::string& haystack, const std::string& needle) {
+  return haystack.find(needle) != std::string::npos;
+}
+
+}  // namespace
+
+// Exercises the supervisor's portable logic against a real temp tree: discovery
+// selects exactly the cgraph-registered repos, reconcile computes the right diff
+// and is idempotent, the plist renderer emits the expected launchd keys, and the
+// plist file layer (write / installed_managed_hashes / uninstall removal) round
+// trips. Real launchctl bootstrap/bootout is the OS seam validated end-to-end
+// manually; these tests never load a real service.
+int main() {
+  bool ok = true;
+
+  const auto base = fs::temp_directory_path() / "cgraph_supervisor_test";
+  fs::remove_all(base);
+  const auto tree = base / "tree";
+
+  // A cgraph-registered repo, a repo registering a different MCP server, and a
+  // plain directory with no .mcp.json.
+  write_file(tree / "repo_cgraph" / ".mcp.json",
+             R"({"mcpServers":{"cgraph":{"command":"/usr/local/bin/cgraph-mcp"}}})");
+  write_file(tree / "repo_other" / ".mcp.json",
+             R"({"mcpServers":{"other":{"command":"/usr/local/bin/other-mcp"}}})");
+  fs::create_directories(tree / "repo_none");
+  write_file(tree / "loose_file.txt", "not a repo\n");
+
+  cgraph::SupervisorConfig config;
+  config.search_roots = {tree};
+  config.launch_agents_dir = base / "LaunchAgents";
+  config.graphd_binary = "/opt/cgraph/graphd";
+  config.cgraph_binary = "/opt/cgraph/cgraph";
+
+  // --- Discovery: exactly the cgraph repo, keyed by the daemon identity hash. ---
+  const auto discovered = cgraph::discover_tracked_repos(config);
+  expect(ok, discovered.size() == 1, "discovery finds exactly the cgraph-registered repo");
+  if (discovered.size() == 1) {
+    const auto& repo = discovered.front();
+    const auto identity = cgraph::daemon_identity_for(tree / "repo_cgraph");
+    expect(ok, repo.root_hash == identity.root_hash,
+           "discovery key equals the daemon endpoint identity hash");
+    expect(ok, repo.root == cgraph::canonical_project_root(tree / "repo_cgraph"),
+           "discovered root is the canonical project root");
+  }
+
+  expect(ok, cgraph::mcp_json_registers_cgraph(tree / "repo_cgraph" / ".mcp.json"),
+         "mcp_json_registers_cgraph true for a cgraph server");
+  expect(ok, !cgraph::mcp_json_registers_cgraph(tree / "repo_other" / ".mcp.json"),
+         "mcp_json_registers_cgraph false for a non-cgraph server");
+  expect(ok, !cgraph::mcp_json_registers_cgraph(tree / "repo_none" / ".mcp.json"),
+         "mcp_json_registers_cgraph false when absent");
+
+  // --- Reconcile: add missing, remove orphaned, idempotent at steady state. ---
+  const std::string hash = discovered.empty() ? "" : discovered.front().root_hash;
+  const auto add_plan = cgraph::reconcile_tracked_repos(discovered, {});
+  expect(ok, add_plan.to_add.size() == 1 && add_plan.to_remove.empty(),
+         "reconcile schedules the discovered repo for add");
+  const auto steady = cgraph::reconcile_tracked_repos(discovered, {hash});
+  expect(ok, steady.to_add.empty() && steady.to_remove.empty(),
+         "reconcile is idempotent when installed == discovered");
+  const auto orphan = cgraph::reconcile_tracked_repos(discovered, {hash, "deadbeef"});
+  expect(ok, orphan.to_add.empty() && orphan.to_remove.size() == 1 && orphan.to_remove.front() == "deadbeef",
+         "reconcile schedules an orphaned installed hash for removal");
+
+  // --- Plist rendering: per-repo daemon and supervisor. ---
+  cgraph::LaunchAgentSpec repo_spec;
+  repo_spec.label = cgraph::per_repo_agent_label("abc123");
+  repo_spec.program_args = {"/opt/cgraph/graphd", "--root", "/x/y", "--idle-timeout", "0"};
+  repo_spec.keep_alive = true;
+  repo_spec.run_at_load = true;
+  const auto repo_plist = cgraph::render_launch_agent(repo_spec);
+  expect(ok, contains(repo_plist, "<string>com.cgraph.graphd.abc123</string>"), "plist has per-repo label");
+  expect(ok, contains(repo_plist, "<string>--idle-timeout</string>") && contains(repo_plist, "<string>0</string>"),
+         "plist wires never-idle graphd args");
+  expect(ok, contains(repo_plist, "<key>KeepAlive</key>\n  <true/>"), "plist enables KeepAlive");
+  expect(ok, contains(repo_plist, "<key>RunAtLoad</key>\n  <true/>"), "plist enables RunAtLoad");
+
+  cgraph::LaunchAgentSpec sup_spec;
+  sup_spec.label = cgraph::kSupervisorLabel;
+  sup_spec.program_args = {"/opt/cgraph/cgraph", "daemon", "sync"};
+  sup_spec.run_at_load = true;
+  sup_spec.start_interval = 300;
+  const auto sup_plist = cgraph::render_launch_agent(sup_spec);
+  expect(ok, contains(sup_plist, "<key>StartInterval</key>\n  <integer>300</integer>"),
+         "supervisor plist sets StartInterval");
+  expect(ok, contains(sup_plist, "<string>sync</string>"), "supervisor plist runs daemon sync");
+
+  // --- Plist file layer: write, discover installed, uninstall removes. ---
+  const auto written = cgraph::write_launch_agent(config.launch_agents_dir, repo_spec);
+  expect(ok, !written.empty() && fs::exists(written), "write_launch_agent writes the plist");
+  const auto installed = cgraph::installed_managed_hashes(config.launch_agents_dir);
+  expect(ok, std::find(installed.begin(), installed.end(), "abc123") != installed.end(),
+         "installed_managed_hashes reports the written per-repo agent");
+  expect(ok, cgraph::root_hash_from_label("com.cgraph.graphd.abc123") == "abc123",
+         "root_hash_from_label parses a managed label");
+  expect(ok, cgraph::root_hash_from_label(cgraph::kSupervisorLabel).empty(),
+         "root_hash_from_label ignores the supervisor label");
+
+  // sync with apply=false computes the plan without any launchctl side effect.
+  const auto dry = cgraph::supervisor_sync(config, /*apply=*/false);
+  expect(ok, dry.plan.to_add.size() == 1 && dry.plan.to_remove.size() == 1,
+         "dry sync adds the discovered repo and removes the orphaned abc123 plist");
+
+  // uninstall removes all managed plists (launchctl bootout of never-loaded labels
+  // is a harmless no-op; the file removal is the observable residue guarantee).
+  (void)cgraph::write_launch_agent(config.launch_agents_dir, sup_spec);
+  const bool uninstalled = cgraph::supervisor_uninstall(config);
+  expect(ok, uninstalled, "uninstall reports success");
+  expect(ok, cgraph::installed_managed_hashes(config.launch_agents_dir).empty(),
+         "uninstall leaves no managed per-repo plist");
+  expect(ok, !fs::exists(config.launch_agents_dir / (std::string(cgraph::kSupervisorLabel) + ".plist")),
+         "uninstall removes the supervisor plist");
+
+  fs::remove_all(base);
+  return ok ? 0 : 1;
+}

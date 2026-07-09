@@ -6,6 +6,7 @@ add_library(cgraph_engine STATIC
   daemon_lifecycle.cpp
   daemon_ops.cpp
   daemon_security.cpp
+  daemon_supervisor.cpp
   daemon_identity.cpp
   dedup.cpp
   cpp_extractor.cpp
@@ -22,6 +23,7 @@ add_library(cgraph_engine STATIC
   index_persistence.cpp
   javascript_extractor.cpp
   language_config.cpp
+  launch_agent.cpp
   non_grammar_extractors.cpp
   normalize.cpp
   operation_stats.cpp

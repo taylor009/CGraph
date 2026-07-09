@@ -137,29 +137,6 @@ namespace {
 // this root: the caller should exit cleanly (0) rather than treat it as an error.
 constexpr int kEndpointAlreadyServed = -2;
 
-// Probe whether a live daemon is already listening on socket_path. A stale socket
-// file left by a crashed daemon refuses the connection (safe to reclaim); a live
-// listener accepts it (defer). Distinguishes the two cases that decide whether the
-// unconditional unlink below would steal a running daemon's endpoint.
-[[nodiscard]] bool endpoint_has_live_daemon(const std::filesystem::path& socket_path) {
-  std::error_code error;
-  if (!std::filesystem::exists(socket_path, error)) {
-    return false;  // no endpoint at all -> nothing to defer to
-  }
-  const int probe_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-  if (probe_fd < 0) {
-    return false;
-  }
-  sockaddr_un addr{};
-  if (!fill_sockaddr(addr, socket_path.string())) {
-    ::close(probe_fd);
-    return false;
-  }
-  const int rc = ::connect(probe_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-  ::close(probe_fd);
-  return rc == 0;  // a live listener accepted the connection
-}
-
 // Open a Unix-domain listening socket at socket_path. If a healthy daemon already
 // serves this root, returns kEndpointAlreadyServed without touching the endpoint.
 // Otherwise clears any stale endpoint from a crashed daemon and binds. Returns the
@@ -169,7 +146,7 @@ constexpr int kEndpointAlreadyServed = -2;
   ensure_unix_socket_dir(socket_path);
   // Never unlink a live endpoint out from under a running daemon: probe first so
   // a start race (supervisor + MCP auto-spawn) defers instead of stealing it.
-  if (endpoint_has_live_daemon(socket_path)) {
+  if (unix_endpoint_is_live(socket_path)) {
     std::cerr << "graphd: already serving " << socket_path << ", deferring to the resident daemon\n";
     return kEndpointAlreadyServed;
   }
