@@ -87,6 +87,20 @@ int main() {
     return 1;
   }
 
+  // A non-positive idle timeout means "never idle-shut-down" (resident/supervised
+  // mode): should_shutdown_for_idle stays false no matter how much time elapses.
+  cgraph::DaemonLifecycleConfig immortal_config{
+      .endpoint_path = endpoint,
+      .graph_path = graph_path,
+      .idle_timeout = std::chrono::seconds::zero(),
+      .persist_interval = 10s,
+  };
+  cgraph::DaemonLifecycleState immortal_lifecycle;
+  cgraph::record_daemon_activity(immortal_lifecycle, start);
+  if (cgraph::should_shutdown_for_idle(immortal_lifecycle, immortal_config, start + 100000s)) {
+    return 1;
+  }
+
   cgraph::mark_graph_dirty(lifecycle, start + 1s);
   if (cgraph::persist_if_due(state, lifecycle, config, start + 9s)) {
     return 1;

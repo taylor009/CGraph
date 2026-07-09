@@ -133,11 +133,23 @@ std::optional<nlohmann::json> request_over_unix_socket(const std::filesystem::pa
 
 namespace {
 
-// Open a Unix-domain listening socket at socket_path (clearing any stale endpoint
-// from a crashed daemon). Returns the listen fd, or -1 on failure (already logged).
+// Sentinel returned by open_listen_socket when a healthy daemon already serves
+// this root: the caller should exit cleanly (0) rather than treat it as an error.
+constexpr int kEndpointAlreadyServed = -2;
+
+// Open a Unix-domain listening socket at socket_path. If a healthy daemon already
+// serves this root, returns kEndpointAlreadyServed without touching the endpoint.
+// Otherwise clears any stale endpoint from a crashed daemon and binds. Returns the
+// listen fd, or -1 on failure (already logged).
 // Shared by the full build-and-watch server and the static seam server.
 [[nodiscard]] int open_listen_socket(const std::filesystem::path& socket_path) {
   ensure_unix_socket_dir(socket_path);
+  // Never unlink a live endpoint out from under a running daemon: probe first so
+  // a start race (supervisor + MCP auto-spawn) defers instead of stealing it.
+  if (unix_endpoint_is_live(socket_path)) {
+    std::cerr << "graphd: already serving " << socket_path << ", deferring to the resident daemon\n";
+    return kEndpointAlreadyServed;
+  }
   ::unlink(socket_path.c_str());
 
   const int listen_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -176,6 +188,9 @@ int run_static_seam_server(const std::filesystem::path& root, DaemonServerOption
   const auto identity = daemon_identity_for(root);
   const auto socket_path = unix_socket_path(identity);
   const int listen_fd = open_listen_socket(socket_path);
+  if (listen_fd == kEndpointAlreadyServed) {
+    return 0;  // a resident daemon already serves this root; defer cleanly
+  }
   if (listen_fd < 0) {
     return 1;
   }
@@ -214,7 +229,10 @@ int run_static_seam_server(const std::filesystem::path& root, DaemonServerOption
       break;
     }
     if (ready == 0) {
-      if (FileWatcherClock::now() - last_activity >= options.idle_timeout) {
+      // A non-positive idle timeout disables idle shutdown entirely: the daemon
+      // stays resident (and watching) until an explicit shutdown op or signal.
+      if (options.idle_timeout > std::chrono::seconds::zero() &&
+          FileWatcherClock::now() - last_activity >= options.idle_timeout) {
         std::cerr << "graphd: idle timeout, shutting down\n";
         break;
       }
@@ -243,6 +261,9 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   const auto identity = daemon_identity_for(root);
   const auto socket_path = unix_socket_path(identity);
   const int listen_fd = open_listen_socket(socket_path);
+  if (listen_fd == kEndpointAlreadyServed) {
+    return 0;  // a resident daemon already serves this root; defer cleanly
+  }
   if (listen_fd < 0) {
     return 1;
   }
@@ -665,7 +686,10 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     }
 
     if (ready == 0) {
-      if (FileWatcherClock::now() - last_activity >= options.idle_timeout) {
+      // A non-positive idle timeout disables idle shutdown entirely: the daemon
+      // stays resident (and watching) until an explicit shutdown op or signal.
+      if (options.idle_timeout > std::chrono::seconds::zero() &&
+          FileWatcherClock::now() - last_activity >= options.idle_timeout) {
         std::cerr << "graphd: idle timeout, shutting down\n";
         break;
       }
