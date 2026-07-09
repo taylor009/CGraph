@@ -82,6 +82,15 @@ int main() {
   }
   expect(ok, nodes_before >= 2, "initial build published baseline graph");
 
+  // Single-owner bind: with daemon A resident on this root, a second daemon start
+  // for the SAME root must defer (return 0) without unlinking A's live endpoint, and
+  // A must keep answering. Regression guard against endpoint theft on a start race.
+  const int defer_rc = cgraph::run_daemon_server(root, options);
+  expect(ok, defer_rc == 0, "second daemon for a served root defers cleanly");
+  const auto still_a = request_with_retry(socket_path, cgraph::make_request("status"));
+  expect(ok, still_a && (*still_a)["ok"] == true,
+         "original daemon still owns the socket after a deferred start");
+
   // Enrichment re-plan gating: the initial plan runs once after the build; a
   // code-only `update .` must NOT re-plan (no doc tree walk), but a doc change
   // must. enrichment_plans_run is the observable: a re-plan increments it.
@@ -258,6 +267,40 @@ int main() {
   expect(ok, shutdown2 && (*shutdown2)["ok"] == true, "second shutdown accepted");
   server2.join();
   expect(ok, server2_rc == 0, "second server exited cleanly");
+
+  // Never-idle + stale-socket reclaim on a fresh root. (a) A daemon started with
+  // idle_timeout == 0 must reclaim a stale (non-live) socket file left at its
+  // endpoint by a crashed predecessor and bind anyway. (b) It must stay resident
+  // well past what a positive timeout would have killed, because idle shutdown is
+  // disabled — the property that lets the supervisor keep it alive indefinitely.
+  const auto root2 = fs::temp_directory_path() / "cgraph_daemon_never_idle_test";
+  fs::remove_all(root2);
+  fs::create_directories(root2);
+  write_file(root2 / "src" / "one.ts", "export function one() { return 1; }\n");
+  const auto socket2 = cgraph::unix_socket_path(cgraph::daemon_identity_for(root2));
+  cgraph::ensure_unix_socket_dir(socket2);
+  write_file(socket2, "stale, not a live listener");  // stale endpoint from a "crash"
+
+  cgraph::DaemonServerOptions immortal = options;
+  immortal.idle_timeout = std::chrono::seconds::zero();  // never idle-shut-down
+  immortal.build_graph_on_start = false;                 // serve immediately, no build wait
+  int immortal_rc = -1;
+  std::thread immortal_server([&] { immortal_rc = cgraph::run_daemon_server(root2, immortal); });
+
+  const auto reclaimed = request_with_retry(socket2, cgraph::make_request("status"));
+  expect(ok, reclaimed && (*reclaimed)["ok"] == true, "daemon reclaimed the stale socket and serves");
+
+  // With a positive timeout the daemon would exit after idle_timeout of inactivity;
+  // with 0 it must still answer after several idle select windows (200ms each).
+  std::this_thread::sleep_for(std::chrono::milliseconds(700));
+  const auto still_up = request_with_retry(socket2, cgraph::make_request("status"));
+  expect(ok, still_up && (*still_up)["ok"] == true, "idle_timeout==0 keeps the daemon resident");
+
+  const auto shutdown3 = cgraph::request_over_unix_socket(socket2, cgraph::make_request("shutdown"));
+  expect(ok, shutdown3 && (*shutdown3)["ok"] == true, "never-idle daemon shuts down on explicit op");
+  immortal_server.join();
+  expect(ok, immortal_rc == 0, "never-idle server exited cleanly");
+  fs::remove_all(root2);
 
   fs::remove_all(root);
   return ok ? 0 : 1;

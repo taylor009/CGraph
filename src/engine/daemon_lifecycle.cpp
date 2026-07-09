@@ -30,6 +30,12 @@ bool should_shutdown_for_idle(
     const DaemonLifecycleState& lifecycle,
     const DaemonLifecycleConfig& config,
     DaemonClock::time_point now) {
+  // A non-positive idle timeout means "never idle-shut-down": a supervised /
+  // resident daemon stays alive until an explicit shutdown op or signal, so the
+  // background watcher keeps folding edits in whether or not queries arrive.
+  if (config.idle_timeout <= std::chrono::seconds::zero()) {
+    return false;
+  }
   return now - lifecycle.last_activity >= config.idle_timeout;
 }
 
