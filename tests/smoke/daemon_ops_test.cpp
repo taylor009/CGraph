@@ -75,9 +75,10 @@ int main() {
     return 1;
   }
 
-  // Matching is case-insensitive: "alpha" finds "Alpha" and "AlphaLeaf". A ready
-  // graph carries no "building" annotation.
-  const auto query = cgraph::handle_daemon_request(state, cgraph::make_request("query", {{"q", "alpha"}}));
+  // A substring shared by several symbols but equal to none ("pha" -> "Alpha",
+  // "AlphaLeaf") is a lexical search, case-insensitive. A ready graph carries no
+  // "building" annotation.
+  const auto query = cgraph::handle_daemon_request(state, cgraph::make_request("query", {{"q", "pha"}}));
   const auto& query_result = query["result"];
   const auto& query_nodes = query_result["nodes"];
   // Both "Alpha" and "AlphaLeaf" match; total reflects the full match count.
@@ -97,13 +98,13 @@ int main() {
 
   // kind/file filters narrow the match set.
   const auto by_kind = cgraph::handle_daemon_request(
-      state, cgraph::make_request("query", {{"q", "alpha"}, {"kind", "class"}}));
+      state, cgraph::make_request("query", {{"q", "pha"}, {"kind", "class"}}));
   if (by_kind["result"]["nodes"].size() != 1 ||
       by_kind["result"]["nodes"][0].value("id", std::string{}) != "a") {
     return 1;
   }
   const auto by_file = cgraph::handle_daemon_request(
-      state, cgraph::make_request("query", {{"q", "alpha"}, {"file", "alpha.cpp"}}));
+      state, cgraph::make_request("query", {{"q", "pha"}, {"file", "alpha.cpp"}}));
   if (by_file["result"]["nodes"].size() != 1 ||
       by_file["result"]["nodes"][0].value("id", std::string{}) != "a") {
     return 1;
@@ -153,10 +154,24 @@ int main() {
   if (fallthrough["result"].value("route", std::string{}) != "search") {
     return 1;
   }
-  // A name that is also a substring of other symbols stays a search (not entity):
-  // "alpha" must still return both Alpha and AlphaLeaf.
-  const auto still_search = cgraph::handle_daemon_request(
+  // A precise symbol routes to entity even when its token collides as a substring of
+  // other symbols: "alpha" equals the class "Alpha" exactly (one exact match) while
+  // also being a substring of "AlphaLeaf". The substring collision no longer forces a
+  // search -- this is the regression guard for route-query-by-intent on large graphs,
+  // where exact symbol names routinely collide as substrings of many other ids/labels.
+  const auto entity_collide = cgraph::handle_daemon_request(
       state, cgraph::make_request("query", {{"q", "alpha"}}));
+  const auto& entity_collide_r = entity_collide["result"];
+  if (entity_collide_r.value("route", std::string{}) != "entity" ||
+      entity_collide_r["nodes"].size() != 1 ||
+      entity_collide_r["nodes"][0].value("id", std::string{}) != "a" ||
+      entity_collide_r["neighbors"]["callees"].value("count", 0U) != 1U) {
+    return 1;  // a -> b CALLS, so Alpha's sole callee is Beta
+  }
+  // A needle that equals no symbol but is a substring of several stays a search: "pha"
+  // matches Alpha and AlphaLeaf but is neither, so there is no unique entity to pin.
+  const auto still_search = cgraph::handle_daemon_request(
+      state, cgraph::make_request("query", {{"q", "pha"}}));
   if (still_search["result"].value("route", std::string{}) != "search" ||
       still_search["result"]["nodes"].size() != 2) {
     return 1;
