@@ -64,6 +64,15 @@
       `com.cgraph.graphd.<hash>.plist`; `daemon status` -> `[live]`; `cgraph-client query` returns the
       seeded symbol from the resident daemon; `daemon uninstall` boots it out and removes the plist
       (0 left); `daemon status` -> `[stopped]`, no stray graphd, no `com.cgraph.*` in user launchd.
-- [ ] 6.2b Real install on frontend/backend/turing-agents (`cgraph daemon install` with the three
+- [x] 6.2b Real install on frontend/backend/turing-agents (`cgraph daemon install` with the three
       repos' parent as a search root) — persistent login LaunchAgents on this machine. Deferred to a
       user-confirmed step; the mechanism is proven by 6.2a.
+      VERIFIED 2026-07-12: discovery found 4 tracked repos under ~/turinglabs/full-turing
+      (frontend, backend, turing-agents, collaboration-service — the 4th also carries a cgraph
+      .mcp.json and is correctly included). 4 com.cgraph.graphd.<hash>.plist + com.cgraph.supervisor
+      (StartInterval 300) in ~/Library/LaunchAgents, all pointing at ~/.local/bin with
+      --idle-timeout 0 and KeepAlive. All 4 daemons live in launchd, uptime 51h, build_state
+      ready (frontend 7859 nodes / 25921 edges), and answering real queries
+      (cgraph-client query "App" -> route search, total 3140). Installed binaries refreshed from
+      today's build (route-2 fix + recall body search); resident daemons pick them up on next
+      restart/login — restarting the live daemons was intentionally not done from this session.
