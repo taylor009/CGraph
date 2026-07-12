@@ -74,8 +74,8 @@ validate against the Graphify fragment schema (malformed → rejected, graph unc
 `status` (`enrichment_state`/`pending`/`running`/`stale`/`failed`).
 
 **MCP** (`src/mcp/mcp_server.cpp`): exposes `graph_query`/`graph_path`/`graph_explain`/
-`graph_impact`/`graph_context`/`graph_update`/`graph_status`/`graph_shutdown` tools that translate
-directly to daemon ops. Adds no model logic.
+`graph_impact`/`graph_context`/`graph_update`/`graph_status`/`graph_shutdown`/`graph_remember`/
+`graph_recall` tools that translate directly to daemon ops. Adds no model logic.
 
 ## Conventions
 

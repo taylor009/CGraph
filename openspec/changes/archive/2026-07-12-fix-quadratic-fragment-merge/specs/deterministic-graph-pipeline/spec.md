@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Fragment merge
 The graph build SHALL merge per-file extraction fragments into a single graph, deduplicating

@@ -12,7 +12,7 @@ The system SHALL run at most one resident daemon per canonical project root, key
 - **THEN** exactly one daemon binds the project socket or pipe and both clients communicate with that daemon
 
 ### Requirement: Cross-platform local IPC
-The daemon SHALL support length-prefixed JSON request and response frames over Unix sockets on Linux and macOS and named pipes on Windows.
+The daemon SHALL support length-prefixed JSON request and response frames over Unix sockets on Linux and macOS. Windows named-pipe transport is deferred: the daemon server, endpoint security descriptor, and client auto-spawn are stubbed on Windows and fail with an explicit not-implemented error rather than a silent degradation.
 
 #### Scenario: Command frame succeeds
 - **WHEN** a client sends a valid `query`, `path`, `explain`, `update`, `status`, or `shutdown` frame

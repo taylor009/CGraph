@@ -24,14 +24,18 @@ timings, labeled as an estimate and omitted when no per-file mean is available.
 
 ## MODIFIED Requirements
 
-### Requirement: Daemon status reporting
-The `status` op SHALL report live daemon and graph state with no field carrying a permanent
+### Requirement: Daemon status
+The daemon SHALL expose status including process id, uptime, node count, edge count, build state,
+cache hit rate, and resident memory where available, with no field carrying a permanent
 placeholder value. Specifically `uptime_seconds` SHALL reflect real elapsed time since daemon
 start, `cache_hit_rate` SHALL reflect the measured fraction of files reused from cache on the most
 recent (re)build, and `enrichment_running` SHALL reflect the count of in-flight enrichment ingests,
 with `enrichment_state` reporting `running` while an ingest is active. The status payload SHALL
 continue to report `pid`, `node_count`, `edge_count`, `build_state`, the enrichment pending/stale/
-failed counts, `watching`, and `incremental_updates`.
+failed counts, `watching`, and `incremental_updates`. Enrichment status (pending, stale, running,
+failed) SHALL be refreshed asynchronously: a build, update, or fragment ingestion SHALL NOT block
+its response on the whole-project enrichment scan, and the enrichment counts SHALL converge after
+the asynchronous re-plan completes.
 
 #### Scenario: Uptime advances with daemon lifetime
 - **WHEN** `status` is queried after the daemon has been running for a measurable interval
@@ -46,3 +50,12 @@ failed counts, `watching`, and `incremental_updates`.
 - **WHEN** an enrichment ingest is in flight
 - **THEN** `status` reports `enrichment_running` >= 1 and `enrichment_state` equal to `running`,
   and both clear once the ingest completes
+
+#### Scenario: Status reports enrichment state
+- **WHEN** a client requests status
+- **THEN** the response includes the current enrichment state and pending/stale/failed counts
+
+#### Scenario: Update does not block on enrichment planning
+- **WHEN** an `update` op rebuilds the graph on a project with many enrichable documents
+- **THEN** the op responds once the graph is rebuilt and persisted, without waiting for the
+  enrichment scan, and the enrichment counts are refreshed shortly afterward

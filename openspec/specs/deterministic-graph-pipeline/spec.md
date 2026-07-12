@@ -219,3 +219,139 @@ dialects) SHALL simply yield no edge rather than an error.
 - **THEN** they are unchanged — extending SQL identifier matching is additive and does not alter
   extraction of any other language
 
+### Requirement: Native deterministic pipeline
+The system SHALL provide a native one-shot pipeline that detects project files, extracts language fragments, builds and deduplicates the graph, clusters communities, analyzes graph metrics, and exports deterministic outputs.
+
+#### Scenario: One-shot graph build completes
+- **WHEN** the user runs the native one-shot command against a supported project root
+- **THEN** the system produces a deterministic graph without requiring a daemon or semantic enrichment
+
+#### Scenario: Unsupported file is skipped safely
+- **WHEN** the file detector encounters an unsupported or ignored file
+- **THEN** the system excludes that file without aborting the pipeline
+
+### Requirement: Graphify fragment contract
+The system SHALL emit and consume extraction fragments compatible with Graphify's fragment shape, including `nodes`, `edges`, optional `hyperedges`, source metadata, relation names, confidence labels, and confidence scores where applicable.
+
+#### Scenario: Extractor emits compatible fragment
+- **WHEN** a supported source file is extracted
+- **THEN** the extracted fragment contains Graphify-compatible node and edge records for downstream build and merge stages
+
+#### Scenario: Extractor failure is contained
+- **WHEN** one file extractor throws or fails to parse
+- **THEN** the system records a warning and continues the batch with an empty fragment for that file
+
+### Requirement: ID normalization parity
+The system SHALL normalize node identifiers byte-for-byte compatibly with Graphify's `_make_id` and build normalization behavior, including Unicode normalization, word-character handling, underscore collapse, and case folding.
+
+#### Scenario: Unicode fixture matches reference
+- **WHEN** the native normalizer runs against ASCII, accented, composed, decomposed, CJK, and Cyrillic identifier fixtures
+- **THEN** every output matches the Python Graphify reference output exactly
+
+### Requirement: Tree-sitter extraction parity
+The system SHALL use tree-sitter grammars and per-language extraction logic to match Graphify's node and edge sets for supported language fixtures.
+
+#### Scenario: Language golden matches reference
+- **WHEN** a native extractor runs against a ported Graphify language fixture
+- **THEN** the produced node and edge sets match the reference fixture except for documented ordering differences
+
+### Requirement: Graph build and dedup parity
+The system SHALL merge fragments into a graph with Graphify-compatible per-file deduplication, cross-file idempotency, semantic merge behavior, and raw-call resolution.
+
+#### Scenario: Duplicate symbols merge correctly
+- **WHEN** multiple fragments contain semantically duplicate nodes
+- **THEN** the build stage merges them according to the reference dedup pipeline and avoids ghost duplicate nodes
+
+#### Scenario: Ambiguous raw call remains unresolved
+- **WHEN** a raw call matches only common or ambiguous names
+- **THEN** the system avoids creating a misleading extracted call edge
+
+### Requirement: Graph analysis and exports
+The system SHALL compute community assignments, centrality-derived god-node rankings, cross-community surprise signals, and Graphify-compatible exports.
+
+#### Scenario: Graph JSON is compatible
+- **WHEN** the native pipeline exports `graph.json`
+- **THEN** existing Graphify-compatible loaders can parse the output as NetworkX node-link data
+
+#### Scenario: Analysis output is available
+- **WHEN** clustering and analysis complete
+- **THEN** clients can access community, centrality, and surprise metadata needed by query and reporting features
+
+### Requirement: Verification gates
+The system SHALL include automated parity tests, sanitizer builds, fuzz targets, and benchmarks before long-tail language, exporter, or host integration fan-out.
+
+#### Scenario: Parity gate blocks fan-out
+- **WHEN** native one-shot output has unexplained missing or spurious graph nodes or edges against the reference corpus
+- **THEN** implementation does not proceed to long-tail integrations until the difference is fixed or explicitly documented
+
+### Requirement: Fragment merge
+The graph build SHALL merge per-file extraction fragments into a single graph, deduplicating
+nodes by normalized id, edges by (source, relation, target), and hyperedges by id, with the
+first occurrence of any duplicate retained. The merge SHALL complete in time linear in the total
+number of fragment nodes and edges, and SHALL NOT rebuild its deduplication index from the
+accumulated graph on a per-fragment basis.
+
+#### Scenario: Duplicates are removed, first occurrence wins
+- **WHEN** fragments contain nodes, edges, or hyperedges whose dedup key already appeared in an
+  earlier fragment or earlier in the same fragment
+- **THEN** the merged graph keeps only the first occurrence of each key and discards the rest
+
+#### Scenario: Bulk merge stays linear
+- **WHEN** a large number of fragments are merged in one build
+- **THEN** total merge time grows linearly with total fragment size, not with file count squared
+
+### Requirement: File extraction
+The system SHALL extract a fragment, raw calls, and raw relations from each detected project file
+using the language-appropriate extractor. Extraction across files MAY execute concurrently, and
+the resulting sequence of per-file extraction results SHALL be identical to extracting the same
+files serially in detection order.
+
+#### Scenario: Parallel extraction matches serial output
+- **WHEN** a set of detected files is extracted concurrently
+- **THEN** the per-file results are produced in detection order and each result is identical to
+  extracting that file on its own, so the merged graph is byte-identical to a serial build
+
+#### Scenario: Unextractable file is isolated
+- **WHEN** one file fails to extract (missing, too large, or no registered extractor)
+- **THEN** its result carries the warning and an empty fragment, and the other files in the batch
+  are unaffected
+
+### Requirement: One-shot operation stats
+A one-shot build SHALL record per-phase wall-clock timings (extract, merge, resolve, dedup,
+community detection, analysis) and counters (files extracted, files reused from cache, node count,
+edge count) measured at the pipeline orchestration boundary. It SHALL write these to a sidecar
+`stats.json` in the output directory and emit a single human-readable summary line to stderr. The
+build SHALL NOT embed stats in `graph.json`; the node-link output SHALL remain byte-identical to a
+build with stats disabled, preserving the Graphify parity contract.
+
+#### Scenario: Build records phase timings and counts
+- **WHEN** a one-shot build completes over a non-empty source tree
+- **THEN** every recorded phase timing is greater than zero, the node and edge counters equal the
+  resulting snapshot's `nodes.size()` and `edges.size()`, and `cgraph-out/stats.json` exists and
+  parses as JSON
+
+#### Scenario: graph.json parity is preserved
+- **WHEN** a build is run with operation stats enabled
+- **THEN** the produced `graph.json` is byte-identical to the parity golden for the same source tree
+
+#### Scenario: Stderr summary is human-readable
+- **WHEN** a one-shot build completes
+- **THEN** stderr contains one summary line reporting file count, node count, edge count, and total
+  build time in human units
+
+### Requirement: Modeled cache-saving estimate
+When a build or rescan reuses cached extractions, the stats output SHALL include a modeled
+cache-saving estimate derived as `files_reused × mean(per-file extract time)` from measured
+timings, presented under a key that identifies it as an estimate. The estimate SHALL be omitted —
+never fabricated, hardcoded, or computed from a zero mean — when no extraction ran in the session
+to establish a per-file mean.
+
+#### Scenario: Estimate present when reuse and timings exist
+- **WHEN** a rescan reuses at least one cached file and at least one file was actually extracted
+- **THEN** the stats output includes a cache-saving estimate equal to
+  `files_reused × mean(extract_ms)`, labeled as an estimate
+
+#### Scenario: Estimate omitted on full cache hit
+- **WHEN** a rescan reuses files but extracts none (no per-file mean available this session)
+- **THEN** no cache-saving estimate is emitted, rather than a fabricated or zero value
+

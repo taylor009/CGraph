@@ -24,6 +24,12 @@ file.
   changed, added, or removed source files
 - **THEN** the daemon loads the persisted graph and serves queries without calling the extractor
 
+#### Scenario: Changed subset re-extracts only what changed
+- **WHEN** the daemon starts with a valid cache and a stat/hash diff finds a subset of files
+  changed, added, or removed
+- **THEN** the daemon re-extracts only those files, reuses cached results for the rest, rebuilds
+  the merged graph, and the result equals a full cold rebuild on the same tree
+
 #### Scenario: Full rescan re-extracts only changed files
 - **WHEN** a full rescan runs while the in-memory index already holds extractions and only a subset
   of files changed

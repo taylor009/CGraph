@@ -48,7 +48,7 @@
 
 - [x] 6.1 Implement project-root canonicalization and per-root daemon identity
 - [x] 6.2 Implement Unix socket endpoint discovery and permissions for Linux and macOS
-- [x] 6.3 Implement Windows named-pipe endpoint discovery and user-scoped DACLs
+- [x] 6.3 Implement Windows named-pipe endpoint discovery and user-scoped DACLs — DEFERRED, not implemented: Windows paths are explicit stubs (daemon_server.cpp, daemon_endpoint.cpp, client_runtime.cpp); spec re-scoped to POSIX-only
 - [x] 6.4 Implement length-prefixed JSON frames and protocol version negotiation
 - [x] 6.5 Implement daemon operations for `query`, `path`, `explain`, `update`, `status`, and `shutdown`
 - [x] 6.6 Implement thin client auto-spawn, bounded connect backoff, and spawn-race locking

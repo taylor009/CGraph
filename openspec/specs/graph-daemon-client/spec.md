@@ -468,3 +468,222 @@ only the current day's.
 - **THEN** it rolls up every recorded lifetime in the ledger, not only those since the start of the
   current day
 
+### Requirement: Per-project daemon
+The system SHALL run at most one resident daemon per canonical project root, keyed by the absolute project path and isolated from other project roots.
+
+#### Scenario: Client auto-spawns daemon
+- **WHEN** a thin client command runs and no daemon is listening for the project root
+- **THEN** the client starts the daemon, waits with bounded backoff, connects, and sends the request
+
+#### Scenario: Concurrent spawn race resolves
+- **WHEN** two clients attempt to start a daemon for the same project root concurrently
+- **THEN** exactly one daemon binds the project socket or pipe and both clients communicate with that daemon
+
+### Requirement: Cross-platform local IPC
+The daemon SHALL support length-prefixed JSON request and response frames over Unix sockets on Linux and macOS. Windows named-pipe transport is deferred: the daemon server, endpoint security descriptor, and client auto-spawn are stubbed on Windows and fail with an explicit not-implemented error rather than a silent degradation.
+
+#### Scenario: Command frame succeeds
+- **WHEN** a client sends a valid `query`, `path`, `explain`, `update`, `status`, or `shutdown` frame
+- **THEN** the daemon processes the operation and returns a valid response frame
+
+#### Scenario: Protocol version mismatch recovers
+- **WHEN** a client connects with an incompatible protocol version
+- **THEN** the daemon is shut down or rejected according to the version-skew policy and the client can respawn a compatible daemon
+
+### Requirement: Secure daemon endpoint
+The daemon SHALL restrict socket or pipe access to the current user and reject cross-user access where platform support exists.
+
+#### Scenario: Unauthorized peer is rejected
+- **WHEN** a peer from another user attempts to connect on a platform with peer credential support
+- **THEN** the daemon rejects the connection before processing any graph command
+
+### Requirement: Thin client command surface
+The system SHALL provide thin client commands for `query`, `path`, `explain`, `update`, `status`, and `shutdown` that do not rebuild the graph for each request in daemon mode.
+
+#### Scenario: Query uses resident graph
+- **WHEN** a user runs a thin client `query` command while the daemon has a loaded graph
+- **THEN** the client sends one request and prints the daemon response without running the full pipeline locally
+
+### Requirement: Immutable snapshot concurrency
+The daemon SHALL serve reads from immutable graph snapshots and apply graph mutations through a
+single writer before publishing a new complete snapshot. A graph the daemon rebuilds from source
+(full rescan or incremental update) SHALL be identical to the graph the canonical one-shot pipeline
+produces for the same files: the same deduplication result and the same node and edge counts, with
+community and centrality computed on the deduplicated node set.
+
+#### Scenario: Read during update is consistent
+- **WHEN** a read request overlaps a watcher-driven update or semantic fragment merge
+- **THEN** the read observes either the previous complete snapshot or the next complete snapshot,
+  never a partially mutated graph
+
+#### Scenario: Rebuilt graph matches the canonical pipeline
+- **WHEN** the daemon rebuilds the graph for a project
+- **THEN** its node and edge counts and its deduplication result match a one-shot build of the same
+  project, and every node carries the centrality computed after deduplication
+
+### Requirement: Daemon lifecycle and fallback
+The daemon SHALL support idle shutdown, clean socket or pipe cleanup, a tiered version-stamped
+startup that reuses a persisted extraction index, and one-shot CLI fallback for environments that
+cannot run resident processes. Startup SHALL escalate by cost: serve directly from the persisted
+graph when no source file has changed; re-extract only changed, added, or removed files when some
+have; and perform a full rebuild only when no usable cache exists. A tiered startup SHALL produce
+a graph byte-identical to a full cold rebuild for the same source tree and version key. A full
+rescan SHALL re-extract only the files that changed since the in-memory index was built, reusing
+the held extraction for unchanged files, and SHALL produce the same graph as re-extracting every
+file.
+
+#### Scenario: Idle daemon exits
+- **WHEN** the daemon has no activity for the configured idle timeout
+- **THEN** it flushes authoritative outputs as needed, releases the endpoint, and exits
+
+#### Scenario: Restricted environment uses one-shot
+- **WHEN** the target environment disallows background resident processes
+- **THEN** the same engine can run in one-shot mode without daemon IPC
+
+#### Scenario: Unchanged tree serves from disk without re-extracting
+- **WHEN** the daemon starts, a valid version-matched cache exists, and a stat/hash diff finds no
+  changed, added, or removed source files
+- **THEN** the daemon loads the persisted graph and serves queries without calling the extractor
+
+#### Scenario: Changed subset re-extracts only what changed
+- **WHEN** the daemon starts with a valid cache and a stat/hash diff finds a subset of files
+  changed, added, or removed
+- **THEN** the daemon re-extracts only those files, reuses cached results for the rest, rebuilds
+  the merged graph, and the result equals a full cold rebuild on the same tree
+
+#### Scenario: Full rescan re-extracts only changed files
+- **WHEN** a full rescan runs while the in-memory index already holds extractions and only a subset
+  of files changed
+- **THEN** only the changed and new files are re-extracted, unchanged files reuse their held
+  extraction, and the resulting graph equals a rescan that re-extracted every file
+
+#### Scenario: Branch switch does not force a full re-extract
+- **WHEN** a checkout rewrites file modification times without changing file contents
+- **THEN** the stat miss falls back to a content-hash comparison and unchanged files are reused
+  rather than re-extracted
+
+### Requirement: Daemon status
+The daemon SHALL expose status including process id, uptime, node count, edge count, build state,
+cache hit rate, and resident memory where available, with no field carrying a permanent
+placeholder value. Specifically `uptime_seconds` SHALL reflect real elapsed time since daemon
+start, `cache_hit_rate` SHALL reflect the measured fraction of files reused from cache on the most
+recent (re)build, and `enrichment_running` SHALL reflect the count of in-flight enrichment ingests,
+with `enrichment_state` reporting `running` while an ingest is active. The status payload SHALL
+continue to report `pid`, `node_count`, `edge_count`, `build_state`, the enrichment pending/stale/
+failed counts, `watching`, and `incremental_updates`. Enrichment status (pending, stale, running,
+failed) SHALL be refreshed asynchronously: a build, update, or fragment ingestion SHALL NOT block
+its response on the whole-project enrichment scan, and the enrichment counts SHALL converge after
+the asynchronous re-plan completes.
+
+#### Scenario: Uptime advances with daemon lifetime
+- **WHEN** `status` is queried after the daemon has been running for a measurable interval
+- **THEN** `uptime_seconds` is greater than zero and increases on a later query
+
+#### Scenario: Cache hit rate reflects real reuse
+- **WHEN** a warm rescan reuses a subset of files and re-extracts the rest
+- **THEN** `cache_hit_rate` reported by `status` equals reused files / total files and lies in
+  the interval (0, 1]
+
+#### Scenario: Enrichment running is observable
+- **WHEN** an enrichment ingest is in flight
+- **THEN** `status` reports `enrichment_running` >= 1 and `enrichment_state` equal to `running`,
+  and both clear once the ingest completes
+
+#### Scenario: Status reports enrichment state
+- **WHEN** a client requests status
+- **THEN** the response includes the current enrichment state and pending/stale/failed counts
+
+#### Scenario: Update does not block on enrichment planning
+- **WHEN** an `update` op rebuilds the graph on a project with many enrichable documents
+- **THEN** the op responds once the graph is rebuilt and persisted, without waiting for the
+  enrichment scan, and the enrichment counts are refreshed shortly afterward
+
+### Requirement: Persisted extraction index
+The daemon SHALL persist the per-file extraction index (each file's extraction fragment, raw
+calls, raw relations, file cache entry, and resolved path aliases) to disk under the project
+output directory, written atomically, so that a subsequent start can rebuild the graph without
+re-extracting unchanged files.
+
+#### Scenario: Index round-trips without loss
+- **WHEN** the daemon persists its extraction index and a later start loads it
+- **THEN** rebuilding the graph from the loaded index produces a graph equal to rebuilding from
+  the in-memory index that was persisted
+
+#### Scenario: Corrupt cache is ignored, never half-loaded
+- **WHEN** the persisted index file is truncated, partially written, or otherwise unparseable
+- **THEN** the daemon treats it as no usable cache, falls back to a full rebuild, and serves a
+  valid graph without crashing
+
+### Requirement: Version-stamped cache invalidation
+The persisted extraction index SHALL carry a content-addressed version key derived from extractor
+identity, language configuration, and ID-normalization rules. The daemon SHALL discard the entire
+cache and perform a full rebuild when the loaded key does not match the running binary's key,
+even when every source file is byte-identical on disk.
+
+#### Scenario: Extractor change invalidates a byte-identical tree
+- **WHEN** the source tree is unchanged but the running binary's version key differs from the
+  persisted cache's key
+- **THEN** the daemon discards the cache and rebuilds the graph from a full extraction rather than
+  serving a graph produced by the previous extractor
+
+#### Scenario: Matching key permits reuse
+- **WHEN** the persisted version key matches the running binary's key
+- **THEN** the daemon is permitted to reuse cached per-file extraction results for unchanged files
+
+### Requirement: Daemon operation stats in status
+The daemon SHALL accumulate per-op counts and total latency for each request type, measured at the
+request-dispatch boundary, and expose them through the `status` op as since-boot lifetime totals
+together with a rolling recent window (last N operations). For queries it SHALL additionally report
+a zero-hit rate (queries returning no results / total queries). The `status` payload SHALL also
+include a modeled cache-saving estimate derived from the most recent (re)build's measured per-file
+timings, labeled as an estimate and omitted when no per-file mean is available.
+
+#### Scenario: Status reports per-op counts and latency
+- **WHEN** a client has issued several `query` ops against the daemon
+- **THEN** `status` reports a `query` count equal to the number issued and a non-zero total/mean
+  latency for that op
+
+#### Scenario: Zero-hit queries are tracked
+- **WHEN** some issued queries return zero results and others return matches
+- **THEN** `status` reports a query zero-hit rate equal to (zero-result queries / total queries)
+
+#### Scenario: Lifetime totals and recent window coexist
+- **WHEN** more operations have been issued than the rolling window capacity
+- **THEN** `status` reports lifetime totals covering all operations and a recent window reflecting
+  only the most recent N, and the recent window never exceeds its capacity
+
+### Requirement: Status reports semantic connectivity
+The `status` op SHALL report a `semantic` block describing how well the host-authored semantic
+layer connects to the code graph, computed from the current snapshot so it reflects live
+enrichment. The block SHALL include the number of document nodes, the number of concept nodes, how
+many document nodes reach a code node (the connected set), the orphan document count, the orphan
+concept count, the number of edges bridging semantic nodes directly into code, and a connectivity
+rate (connected documents / document nodes). A node SHALL be treated as semantic when its id is
+namespaced `doc:`, `concept:`, or `topic:`, and as a code node otherwise.
+
+#### Scenario: Status carries the semantic block
+- **WHEN** the snapshot contains a document node with an edge into a code node
+- **THEN** `status.semantic` reports `doc_nodes` >= 1 and a `connectivity_rate` greater than 0
+
+#### Scenario: Empty semantic layer reports zeros without dividing by zero
+- **WHEN** the snapshot has no semantic nodes (a pure code graph)
+- **THEN** `status.semantic` reports zero doc and concept nodes and a connectivity rate of 0
+
+### Requirement: Document-to-code connectivity is transitive
+A document node SHALL count as connected when it reaches a code node within a bounded number of
+hops over the graph edges, so a document linked to code through a concept
+(`doc -> concept -> code`) counts as connected, not orphan. A document that reaches no code node
+within the bound SHALL count as an orphan document.
+
+#### Scenario: Document connected through a concept counts as connected
+- **WHEN** a document links to a concept that links to a code node, and the hop bound is at least 2
+- **THEN** the document is counted in the connected set, not as an orphan
+
+#### Scenario: Direct and transitive bounds differ
+- **WHEN** the only path from a document to code is `doc -> concept -> code`
+- **THEN** the document is connected at a hop bound of 2 and not connected at a hop bound of 1
+
+#### Scenario: Document reaching no code is an orphan
+- **WHEN** a document links only to a concept that itself has no edge to any code node
+- **THEN** the document is counted as an orphan document and the concept as an orphan concept
+

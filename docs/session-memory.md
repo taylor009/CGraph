@@ -42,7 +42,8 @@ context operation. A checkpoint written before `/clear` is recall-able after it 
 long-running daemon. Bodies live under `cgraph-out/memory/`; checkpoint nodes are added to the
 live graph and persisted into `graph.json`.
 
-Surviving a daemon **restart** or a full **rescan** is not guaranteed in v1: both rebuild the
-graph from extraction (which has no memory nodes), so the live graph loses checkpoint nodes
-(their body files remain on disk). Re-overlaying memory after a rebuild — so checkpoints
-survive restart and rescan — is a planned follow-up.
+Checkpoints also survive a daemon **restart**, incremental edits, and a full **rescan**: the
+sidecar files under `cgraph-out/memory/` are the durable source of truth, and the daemon
+re-overlays every checkpoint sidecar onto the graph after each rebuild (see
+`daemon_server.cpp`, the memory re-ingest hook). Merging is first-occurrence-wins, so
+re-applying an already-present checkpoint is a no-op.

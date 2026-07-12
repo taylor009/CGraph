@@ -8,14 +8,25 @@ Hosts call the thin client or daemon protocol for graph operations. Requests use
 
 Supported operations:
 
-- `query`: Search graph nodes by query text.
+- `query`: Search graph nodes by query text (routed by deterministic intent: structural / entity / search).
 - `path`: Return a graph path between source and target ids.
-- `explain`: Return a node and its neighboring edges.
+- `explain`: Return a node and its neighboring edges, optionally filtered by `relation`.
+- `impact`: Return the reverse-dependency radius of a node.
+- `context`: Gather and pack a token-budgeted context window around a focal query.
 - `update`: Apply deterministic updates. `update .` means full stat-index rescan.
 - `status`: Return daemon, graph, cache, and enrichment state.
 - `shutdown`: Ask the per-root daemon to exit cleanly.
+- `remember`: Persist a session-memory checkpoint (title, tags, markdown body).
+- `recall`: List or filter persisted checkpoints.
 
 Hosts should prefer the thin client command surface unless they are implementing an MCP or always-on bridge that already speaks local JSON frames.
+
+## Cross-Service Seam Graphs
+
+The CLI additionally ships `cgraph seam gen|fuse|query` for cross-service seam graphs: `gen`
+emits a standard node-link enrichment fragment describing cross-service call seams, `fuse`
+builds a fused multi-repo render, and a fused seam directory can be served resident by the
+daemon. Seam fragments follow the same fragment schema as semantic enrichment drops.
 
 ## Chunk Plan Dispatch
 
