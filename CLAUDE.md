@@ -91,3 +91,45 @@ This repo uses **OpenSpec** (`openspec/`, config in `openspec/config.yaml`). The
 specs under `specs/`). The four capability names above map to the spec directories there.
 `/opsx:*` slash commands and the `openspec-*` skills drive the propose → apply → verify → archive
 loop.
+
+## Testing
+
+Always run the full test suite after multi-file changes and before opening a PR; report pass/fail counts (e.g., '35 passing tests').
+
+## Performance / Benchmarks
+
+When optimizing or refactoring, capture before/after benchmarks (e.g., update time 50.7s -> ~15s) and include them in the PR description.
+
+## UI / Frontend
+
+For graph/UI rendering changes, verify visually via browser screenshots and watch for regressions (e.g., nodes clamping to canvas walls) before shipping.
+
+## Debugging Workflow
+
+Use OpenSpec change proposals for non-trivial fixes and trace root causes via LangSmith/Datadog before implementing.
+
+## Research / Eval Discipline
+
+Python research harnesses (e.g. `research/`) are allowed and encouraged for fast retrieval
+experiments. They are NOT product code:
+
+- Python research code is **disposable** unless explicitly promoted to the C++ engine.
+- A **metric win in Python is not automatically a product win** — it must transfer through the
+  engine's real accounting (tokenizer, snippet caps, JSON-entry cost) and real query path.
+- **Never modify eval data or ground-truth labels to improve a metric.** Seeds/candidates must
+  come from the query, never from the labels (that leaks the answer).
+- **Do not commit or push** research artifacts or experiment output unless explicitly asked.
+
+Any successful retrieval experiment MUST document, in `research/<id>/results.md`:
+
+- exact command run (reproducible)
+- baseline metric, candidate metric, and the delta
+- files changed
+- whether eval data changed (expected: no)
+- **which layer the idea belongs in** — graph construction, `graphd` (daemon), retrieval
+  (candidate gathering), or context selection (packing)
+- **proposed C++ integration point** (file/function), so the Python result has a concrete path
+  to production or is explicitly parked
+
+Also record the graph the numbers were measured on (e.g. node/edge count) — absolute metrics are
+only comparable across runs on the same graph; rely on within-run deltas.
