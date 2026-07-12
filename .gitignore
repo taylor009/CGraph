@@ -14,3 +14,7 @@ vcpkg_installed/
 .DS_Store
 compile_commands.json
 .cache/
+__pycache__/
+
+# Agent worktrees (transient, managed by git worktree)
+/.agents/
