@@ -1,0 +1,53 @@
+# Per-project config for scripts/bootstrap_eval.py (ground-truth eval mining).
+# Every value below overrides a built-in default. Delete any key to fall back to
+# the default. The noise profile is project/language specific — tune it here, not
+# in the script. A TS/React repo would add lockfiles, generated types, and
+# snapshots; a Go repo would add *.pb.go and mocks; etc.
+
+[mining]
+max_commits  = 0        # 0 = all non-merge commits; else most-recent N
+since        = ""       # optional git date filter, e.g. "2024-01-01"
+skip_merges  = true
+rebase_lines = true     # map commit-era changed lines onto HEAD node spans (correctness)
+
+[noise]
+# Commits whose subject matches any pattern (case-insensitive) are skipped wholesale.
+skip_subject_patterns = [
+  "^merge ", "^bump ", "^release ", "wip", "^fixup!", "^squash!", "^v?\\d+\\.\\d+\\.\\d+$",
+]
+# Files dropped from the relevant set before grading (path globs, also matched on basename).
+ignore_path_globs = [
+  "**/*.lock", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock",
+  "**/*.min.js", "**/*.snap", "**/__snapshots__/**",
+  "**/dist/**", "**/build/**", "**/node_modules/**", "**/vendor/**",
+  "**/*.generated.*", "**/*_pb2.py", "**/*.pb.go",
+  "cgraph-out/**", "research/**",
+]
+# Mined, but always labeled file-level (never symbol-level), even if symbols exist.
+doc_path_globs = ["**/*.md", "docs/**", "openspec/**", "**/*.rst", "**/*.txt"]
+
+[noise.heuristics]
+max_files_per_commit = 12     # over this: drop docs first, then cap to largest-churn code file
+cap_to_largest_file  = true
+min_changed_lines    = 1      # skip commits below this net churn
+drop_pure_rename     = true
+drop_whitespace_only = true   # skip files whose diff is empty under `git diff -w`
+drop_import_only     = true   # skip files whose added lines are all import/include/use lines
+
+[grading]
+direct_grade         = 2      # symbol whose span intersects the changed lines
+neighbor_grade       = 1      # graph neighbour of a directly-changed symbol
+adjacency_relations  = ["CALLS", "references", "REFERENCES", "imports", "IMPLEMENTED_BY", "RELATED_TO"]
+max_neighbors_per_node = 25   # cap fan-out from high-degree (god) nodes
+neighbor_directions  = "both" # out | in | both
+drop_file_spanning_containers = true   # shed namespace/module wrappers that match every change
+container_span_fraction       = 0.9    # "file-spanning" = covers >= this fraction of file's symbol extent
+
+[synthetic]                   # Tier 1, only emitted with --synthetic
+top_centrality_n   = 30
+questions_per_node = 2
+centrality_property = "degree_centrality"
+
+[query]
+strip_conventional_prefix = true   # "feat(scope): msg" -> "msg"
+strip_trailing_ticket     = true   # drop trailing "(#123)" / "ABC-123"

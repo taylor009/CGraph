@@ -711,6 +711,17 @@ int main() {
     if (rec_q["result"]["checkpoints"].size() != 1) {
       return 98;
     }
+    // query filter reaches body content: "next Y" appears only in the first
+    // checkpoint's body, never in a title or tag; a term found nowhere matches nothing.
+    const auto rec_body = cgraph::handle_daemon_request(s, cgraph::make_request("recall", {{"query", "next y"}}));
+    if (rec_body["result"]["checkpoints"].size() != 1 ||
+        rec_body["result"]["checkpoints"][0].value("label", std::string{}) != "Refactor charge") {
+      return 120;
+    }
+    const auto rec_none = cgraph::handle_daemon_request(s, cgraph::make_request("recall", {{"query", "zzqx"}}));
+    if (!rec_none["result"]["checkpoints"].empty()) {
+      return 121;
+    }
 
     // Memory is inert to code retrieval: a checkpoint title is not a code query
     // match, and a checkpoint is never packed into code context.

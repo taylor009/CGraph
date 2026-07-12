@@ -727,3 +727,19 @@ cgraph_set_warnings(cgraph_pack_context_parity_test)
 cgraph_enable_sanitizers(cgraph_pack_context_parity_test)
 
 add_test(NAME cgraph_pack_context_parity_test COMMAND cgraph_pack_context_parity_test)
+
+add_executable(cgraph_retrieval_quality_test
+  retrieval_quality_test.cpp)
+
+target_compile_definitions(cgraph_retrieval_quality_test
+  PRIVATE
+    CGRAPH_PARITY_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/pack_context_parity")
+
+target_link_libraries(cgraph_retrieval_quality_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_retrieval_quality_test)
+cgraph_enable_sanitizers(cgraph_retrieval_quality_test)
+
+add_test(NAME cgraph_retrieval_quality_test COMMAND cgraph_retrieval_quality_test)

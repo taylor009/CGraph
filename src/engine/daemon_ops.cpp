@@ -805,9 +805,10 @@ struct StructuralIntent {
   // step-A-validated 0/1 knapsack fill). Knapsack gathers a wider ego graph by
   // default. The flag is the rollback boundary: greedy is untouched.
   const auto packing = params.value("packing", std::string{"greedy"});
-  // Adaptive relevance-gated gather (flag-gated, default "fixed" = unchanged): keeps
-  // the full 2-hop core but expands past depth 1 only along query-relevant nodes,
-  // reaching beyond 2 hops without the full 3-hop fan-out. Implies the knapsack fill.
+  // Adaptive relevance-gated gather (the default; pass gather="fixed" to opt out):
+  // keeps the full 2-hop core but expands past depth 1 only along query-relevant
+  // nodes, reaching beyond 2 hops without the full 3-hop fan-out. Implies the
+  // knapsack fill, which also raises the default depth to kKnapsackContextDepth.
   const auto gather = params.value("gather", std::string{"adaptive"});
   const bool adaptive = gather == "adaptive";
   const double gather_theta = std::clamp(params.value("gather_theta", 0.05), 0.0, 1.0);
@@ -1530,8 +1531,14 @@ constexpr std::size_t kMaxCheckpointBodyChars = 16384;
     }
     if (!query.empty()) {
       const auto tags = node.properties.find("tags");
-      const bool hit = contains_ci(node.label, query) ||
-                       (tags != node.properties.end() && contains_ci(tags->second, query));
+      bool hit = contains_ci(node.label, query) ||
+                 (tags != node.properties.end() && contains_ci(tags->second, query));
+      // The substance of a checkpoint lives in its body (remember directs hosts to
+      // write the summary there), so the filter must search it too. Read only when
+      // title/tags already missed, bounded by the same caps as the returned snippet.
+      if (!hit) {
+        hit = contains_ci(read_source_snippet(node).text, query);
+      }
       if (!hit) {
         continue;
       }

@@ -89,19 +89,20 @@ namespace {
           "graph_context",
           "Token-budgeted context bundle for a symbol: the focal node plus its most relevant "
           "neighbors with source snippets, packed to fit a token budget. The fastest way to load "
-          "just enough code to edit or review a symbol. Two gather modes: the default (fixed) pulls "
-          "the whole k-hop neighborhood; adaptive keeps the 2-hop core but expands the third hop "
-          "only along query-relevant nodes, reaching more of what you asked about at a fraction of "
-          "the full 3-hop token cost. Use adaptive when you have a query/q describing the task -- "
-          "it is a no-op without one. The response reports which gather/packing mode ran, and for "
-          "adaptive a reach summary (candidates, expanded_past_core, gated_at_core).",
+          "just enough code to edit or review a symbol. Two gather modes: adaptive (the default) "
+          "keeps the 2-hop core but expands the third hop only along query-relevant nodes, "
+          "reaching more of what you asked about at a fraction of the full 3-hop token cost -- "
+          "pass a query/q describing the task for the relevance gate to work with. fixed pulls "
+          "the plain k-hop neighborhood instead. The response reports which gather/packing mode "
+          "ran, and for adaptive a reach summary (candidates, expanded_past_core, gated_at_core).",
           {{"id", string_param("node id or exact symbol name to focus on")},
            {"query", string_param("free-text fallback when the id is unknown; the best match becomes the focus")},
            {"budget", integer_param("token budget for the bundle (default 6000)")},
-           {"max_depth", integer_param("neighborhood radius in hops (default 2)")},
+           {"max_depth", integer_param("neighborhood radius in hops (default 3 adaptive/knapsack, 2 fixed+greedy)")},
            {"gather", {{"type", "string"}, {"enum", {"fixed", "adaptive"}},
-                       {"description", "fixed = k-hop neighborhood (default); adaptive = keep the 2-hop core but "
-                                       "expand the 3rd hop only along query-relevant nodes (needs query/q)"}}},
+                       {"description", "adaptive = keep the 2-hop core but expand the 3rd hop only along "
+                                       "query-relevant nodes (default; give it a query/q); fixed = plain "
+                                       "k-hop neighborhood"}}},
            {"gather_theta", {{"type", "number"},
                              {"description", "adaptive gate: min query-term overlap to expand past 2 hops (default 0.05)"}}}}),
       tool_schema(
