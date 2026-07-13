@@ -105,10 +105,10 @@ int main() {
     int budget;
     double baseline;  // measured on the committed fixture at gate introduction
   };
-  // Measured on the committed fixture at gate introduction (2026-07-12, N=35):
-  // 0.224 / 0.315 / 0.382. Bite-proof: disabling the lexical fallback drops all
-  // three to 0.000, so a resolution regression cannot pass this gate.
-  const std::vector<Target> targets = {{2000, 0.224}, {4000, 0.315}, {8000, 0.382}};
+  // Re-measured after bounded primary-focal same-file candidate admission
+  // (2026-07-13, N=35): 0.223972 / 0.314825 / 0.382598. The 8k gain is
+  // +0.000840; 2k/4k are byte-for-byte unchanged from the pre-change run.
+  const std::vector<Target> targets = {{2000, 0.224}, {4000, 0.315}, {8000, 0.383}};
   constexpr double kTol = 0.03;
 
   std::cout << "end-to-end retrieval gate  (N=" << rows.size() << " symbol rows, q-only, engine defaults)\n";

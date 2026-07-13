@@ -10,6 +10,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <string>
 #include <thread>
@@ -604,6 +605,109 @@ int main() {
     }
     if (none_ids.count("d3a") != 0 || none_ids.count("d3b") != 0) {
       return 72;  // no third hop taken
+    }
+  }
+
+  // --- adaptive same-file candidates: query-ranked focal-file siblings are admitted
+  //     directly, capped deterministically, and never alter fixed gathering ---
+  {
+    cgraph::DaemonState s;
+    cgraph::GraphSnapshot g;
+    g.build_state = cgraph::BuildState::DeterministicReady;
+    g.nodes.push_back(cgraph::Node{
+        .id = "seed", .label = "CheckoutRoot", .source_file = "checkout.cpp", .kind = "function"});
+    // Already graph-reachable: same-file admission must not replace its CALLS reach.
+    g.nodes.push_back(cgraph::Node{
+        .id = "payment_17", .label = "PaymentHelper17", .source_file = "checkout.cpp", .kind = "function",
+        .properties = {{"degree_centrality", "0.17"}}});
+    g.edges.push_back(cgraph::Edge{.source = "seed", .target = "payment_17", .relation = "CALLS"});
+    for (int i = 0; i < 17; ++i) {
+      g.nodes.push_back(cgraph::Node{
+          .id = "payment_" + std::to_string(i),
+          .label = "PaymentHelper" + std::to_string(i),
+          .source_file = "checkout.cpp",
+          .kind = "function",
+          .properties = {{"degree_centrality", std::to_string(static_cast<double>(i) / 100.0)}}});
+    }
+    g.nodes.push_back(cgraph::Node{
+        .id = "logging", .label = "LoggingHelper", .source_file = "checkout.cpp", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{
+        .id = "empty_source", .label = "PaymentEmpty", .source_file = "", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{
+        .id = "memory:payment", .label = "PaymentMemory", .source_file = "checkout.cpp", .kind = "checkpoint"});
+    cgraph::publish_graph_snapshot(s, std::move(g));
+
+    const auto included_by_id = [](const nlohmann::json& result) {
+      std::map<std::string, nlohmann::json> items;
+      for (const auto& item : result["included"]) {
+        items.emplace(item.value("id", std::string{}), item);
+      }
+      return items;
+    };
+
+    const auto fixed = cgraph::handle_daemon_request(
+        s, cgraph::make_request(
+               "context", {{"id", "seed"}, {"q", "Payment"}, {"gather", "fixed"}, {"budget", 100000}}));
+    const auto fixed_items = included_by_id(fixed["result"]);
+    if (fixed_items.size() != 1 || fixed_items.count("payment_17") == 0) {
+      return 130;  // only the persisted CALLS edge is visible in fixed mode
+    }
+
+    const auto adaptive = cgraph::handle_daemon_request(
+        s, cgraph::make_request(
+               "context", {{"id", "seed"}, {"q", "Payment"}, {"gather", "adaptive"},
+                           {"gather_theta", 0.05}, {"budget", 100000}}));
+    const auto items = included_by_id(adaptive["result"]);
+    if (items.size() != 6) {
+      return 131;  // one graph neighbor plus five newly admitted same-file siblings
+    }
+    if (items.at("payment_17").value("via", std::string{}) != "CALLS") {
+      return 132;  // real-edge reach wins deduplication
+    }
+    for (int i = 12; i < 17; ++i) {
+      const auto id = "payment_" + std::to_string(i);
+      if (items.count(id) == 0 || items.at(id).value("depth", 0) != 2 ||
+          items.at(id).value("via", std::string{}) != "same_file") {
+        return 133;  // top five un-reached siblings, centrality descending
+      }
+    }
+    if (items.count("payment_11") != 0 || items.count("logging") != 0 ||
+        items.count("empty_source") != 0 || items.count("memory:payment") != 0) {
+      return 134;  // cap, relevance, empty-source, and memory exclusions
+    }
+  }
+
+  {
+    cgraph::DaemonState s;
+    cgraph::GraphSnapshot g;
+    g.build_state = cgraph::BuildState::DeterministicReady;
+    g.nodes.push_back(cgraph::Node{.id = "seed", .label = "PaymentRoot", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{
+        .id = "sibling", .label = "PaymentSibling", .source_file = "payment.cpp", .kind = "function"});
+    cgraph::publish_graph_snapshot(s, std::move(g));
+    const auto empty_seed_context = cgraph::handle_daemon_request(
+        s, cgraph::make_request(
+               "context", {{"id", "seed"}, {"q", "Payment"}, {"gather", "adaptive"}, {"budget", 100000}}));
+    if (!empty_seed_context["result"]["included"].empty()) {
+      return 135;  // an empty-source seed cannot open another file's siblings
+    }
+  }
+
+  {
+    cgraph::DaemonState s;
+    cgraph::GraphSnapshot g;
+    g.build_state = cgraph::BuildState::DeterministicReady;
+    g.nodes.push_back(cgraph::Node{
+        .id = "seed", .label = "PaymentRoot", .source_file = "payment.cpp", .kind = "function"});
+    g.nodes.push_back(cgraph::Node{
+        .id = "logging", .label = "LoggingHelper", .source_file = "payment.cpp", .kind = "function"});
+    cgraph::publish_graph_snapshot(s, std::move(g));
+    const auto ranked_context = cgraph::handle_daemon_request(
+        s, cgraph::make_request(
+               "context", {{"id", "seed"}, {"q", "Payment"}, {"gather", "adaptive"}, {"budget", 100000}}));
+    if (!ranked_context["result"]["included"].empty() ||
+        ranked_context["result"]["reach"].value("candidates", 0) != 1) {
+      return 136;  // zero-overlap siblings are gathered but receive no knapsack value
     }
   }
 
