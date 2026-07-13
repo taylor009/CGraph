@@ -231,6 +231,10 @@ struct Snippet {
 // symbol only ~23% of the time (research/focal-resolution/results.md); seeding
 // from several hedges query ambiguity.
 constexpr std::size_t kFocalSeedCount = 5;
+// Same-file expansion targets the measured focal-file recall tail without
+// letting generated or unusually dense files flood the candidate set. Five
+// preserves the committed-fixture recall gain while bounding candidate growth.
+constexpr std::size_t kSameFileCandidateCap = 5;
 
 // Nodes that share at least one lexical term with the query, ranked by overlap
 // (then centrality, then label). The fallback when literal substring matching
@@ -908,6 +912,42 @@ struct StructuralIntent {
     }
   }
 
+  // The graph has no direct sibling edge between otherwise-unrelated symbols in
+  // one file. Under adaptive gathering only, admit siblings from the primary
+  // focal's file as direct, query-ranked candidates. They do not enter `frontier`:
+  // the measured opportunity is focal-file context, not opening another graph
+  // neighborhood through every sibling. Fixed gathering remains structurally
+  // untouched by keeping the whole path behind `adaptive`.
+  if (adaptive && !query_terms.empty() && !focal->source_file.empty()) {
+    std::vector<std::pair<double, const Node*>> same_file;
+    for (const auto& node : graph.nodes) {
+      if (node.source_file != focal->source_file || node.kind == "file" ||
+          is_memory_node_id(node.id) || reached.contains(node.id)) {
+        continue;
+      }
+      same_file.emplace_back(query_term_overlap(query_terms, node.label), &node);
+    }
+    std::ranges::sort(same_file, [](const auto& lhs, const auto& rhs) {
+      if (lhs.first != rhs.first) {
+        return lhs.first > rhs.first;
+      }
+      const auto lc = node_centrality(*lhs.second);
+      const auto rc = node_centrality(*rhs.second);
+      if (lc != rc) {
+        return lc > rc;
+      }
+      return lhs.second->id < rhs.second->id;
+    });
+
+    const auto admitted = std::min(kSameFileCandidateCap, same_file.size());
+    for (std::size_t i = 0; i < admitted; ++i) {
+      // Same-file proximity is weaker evidence than a persisted graph edge.
+      // Depth two keeps these candidates available without tying direct
+      // structural neighbors in the knapsack value model.
+      reached.emplace(same_file[i].second->id, Reached{2, "same_file"});
+    }
+  }
+
   std::vector<const Node*> candidates;
   int expanded_past_core = 0;  // candidates reached beyond the 2-hop core (depth >= 3)
   for (const auto& [node_id, info] : reached) {
@@ -954,7 +994,13 @@ struct StructuralIntent {
       const auto* node = candidates[i];
       weight[i] = slice_token_cost(*node);
       const auto depth = reached[node->id].depth;
-      value[i] = 1.0 / (1.0 + static_cast<double>(depth)) + query_term_overlap(query_terms, node->label);
+      const auto overlap = query_term_overlap(query_terms, node->label);
+      // Same-file admission is an inferred relationship, so it earns lexical
+      // value only. Giving it the ordinary hop bonus displaced real graph
+      // neighbors when lexical focal resolution chose an ambiguous primary.
+      value[i] = reached[node->id].via == "same_file"
+                     ? overlap
+                     : 1.0 / (1.0 + static_cast<double>(depth)) + overlap;
       total_weight += weight[i];
     }
 
