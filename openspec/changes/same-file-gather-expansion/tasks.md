@@ -24,4 +24,4 @@
 
 ## 5. Delivery
 
-- [ ] 5.1 Commit the validated OpenSpec artifacts, source, and tests in logical commits; push `same-file-gather-expansion` and open a PR with the recall, parity, latency, and real-flow evidence.
+- [x] 5.1 Commit the validated OpenSpec artifacts, source, and tests in logical commits; push `same-file-gather-expansion` and open a PR with the recall, parity, latency, and real-flow evidence.
