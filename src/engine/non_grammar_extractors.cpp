@@ -295,4 +295,19 @@ std::optional<ExtractionResult> extract_non_grammar_language(
   }
 }
 
+// Keep in sync with the extract_non_grammar_language dispatch above.
+bool handles_non_grammar_language(DetectedLanguage language) {
+  switch (language) {
+    case DetectedLanguage::MsBuild:
+    case DetectedLanguage::Xml:
+    case DetectedLanguage::Delphi:
+    case DetectedLanguage::Apex:
+    case DetectedLanguage::McpConfig:
+    case DetectedLanguage::Sql:
+      return true;
+    default:
+      return false;
+  }
+}
+
 }  // namespace cgraph

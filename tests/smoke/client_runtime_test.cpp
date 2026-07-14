@@ -16,6 +16,22 @@ std::optional<nlohmann::json> ok_response(const char* source) {
   return nlohmann::json{{"ok", true}, {"source", source}};
 }
 
+bool set_environment(const char* name, const char* value) {
+#ifdef _WIN32
+  return ::_putenv_s(name, value) == 0;
+#else
+  return ::setenv(name, value, /*overwrite=*/1) == 0;
+#endif
+}
+
+bool remove_environment(const char* name) {
+#ifdef _WIN32
+  return ::_putenv_s(name, "") == 0;
+#else
+  return ::unsetenv(name) == 0;
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -129,18 +145,24 @@ int main() {
   // Daemon discovery precedence: an explicit path wins, then CGRAPH_DAEMON_PATH,
   // then a graphd beside the executable (absent for this test binary -> empty).
   {
-    ::unsetenv("CGRAPH_DAEMON_PATH");
+    if (!remove_environment("CGRAPH_DAEMON_PATH")) {
+      return 1;
+    }
     if (cgraph::resolve_daemon_path("/explicit/graphd") != std::filesystem::path{"/explicit/graphd"}) {
       return 1;
     }
-    ::setenv("CGRAPH_DAEMON_PATH", "/env/graphd", 1);
+    if (!set_environment("CGRAPH_DAEMON_PATH", "/env/graphd")) {
+      return 1;
+    }
     if (cgraph::resolve_daemon_path({}) != std::filesystem::path{"/env/graphd"}) {
       return 1;
     }
     if (cgraph::resolve_daemon_path("/explicit/graphd") != std::filesystem::path{"/explicit/graphd"}) {
       return 1;  // explicit beats the environment
     }
-    ::unsetenv("CGRAPH_DAEMON_PATH");
+    if (!remove_environment("CGRAPH_DAEMON_PATH")) {
+      return 1;
+    }
     if (!cgraph::resolve_daemon_path({}).empty()) {
       return 1;  // no graphd ships next to the test binary
     }

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 
@@ -51,6 +52,10 @@ struct DaemonState {
   // graph automatically, and how many incremental updates it has applied.
   bool watching = false;
   std::size_t incremental_updates = 0;
+  // Detected files no registered extractor handles (language name -> count).
+  // Populated by full rescans and the fast-load start, adjusted by incremental
+  // updates, surfaced in `status` so a coverage hole is never silent.
+  std::map<std::string, std::size_t> unextracted;
   // Performs a deterministic rebuild for an `update` op and returns its result
   // payload. Injected by the running daemon (which owns the file index and
   // project root); when unset, `update` is accepted as a no-op so in-process

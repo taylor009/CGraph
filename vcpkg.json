@@ -1,7 +1,7 @@
 {
   "name": "cgraph-native",
   "version-string": "0.1.0",
-  "builtin-baseline": "6bbea753e7f56a86b1d7bfe548810d6beafb4c81",
+  "builtin-baseline": "f7410a9e287d8aea1aab44d948c453aa29018321",
   "dependencies": [
     "curl",
     "igraph",

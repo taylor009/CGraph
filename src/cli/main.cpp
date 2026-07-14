@@ -141,13 +141,9 @@ int run_enrich_ingest(const Args& args) {
     return cgraph::WallClock::time_point{};  // epoch lower bound: every recorded lifetime
   }
   if (spec == "today") {
-    const std::time_t now = cgraph::WallClock::to_time_t(cgraph::WallClock::now());
-    std::tm tm{};
-    ::gmtime_r(&now, &tm);
-    tm.tm_hour = 0;
-    tm.tm_min = 0;
-    tm.tm_sec = 0;
-    return cgraph::WallClock::from_time_t(::timegm(&tm));
+    std::string midnight = cgraph::format_iso8601_utc(cgraph::WallClock::now());
+    midnight.replace(/*pos=*/11, /*count=*/8, "00:00:00");
+    return cgraph::parse_iso8601_utc(midnight);
   }
   if (spec.size() > 1 && (spec.back() == 'h' || spec.back() == 'd')) {
     try {
@@ -442,10 +438,12 @@ std::filesystem::path current_executable_path(const char* argv0) {
     }
   }
 #elif defined(__linux__)
-  std::error_code ec;
-  auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
-  if (!ec) {
-    return p;
+  {
+    std::error_code ec;
+    auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (!ec) {
+      return p;
+    }
   }
 #endif
   std::error_code ec;

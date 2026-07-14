@@ -9,6 +9,7 @@ discovery.
 | tree-sitter core | https://github.com/tree-sitter/tree-sitter | `da6fe9beb4f7f67beb75914ca8e0d48ae48d6406` |
 | tree-sitter-c | https://github.com/tree-sitter/tree-sitter-c | `b780e47fc780ddc8da13afa35a3f4ed5c157823d` |
 | tree-sitter-cpp | https://github.com/tree-sitter/tree-sitter-cpp | `8b5b49eb196bec7040441bee33b2c9a4838d6967` |
+| tree-sitter-go | https://github.com/tree-sitter/tree-sitter-go | `1547678a9da59885853f5f5cc8a99cc203fa2e2c` |
 | tree-sitter-groovy | https://github.com/murtaza64/tree-sitter-groovy | `deb0dcf8c4544f07564060f6e9b9f6e4b0bfc27d` |
 | tree-sitter-java | https://github.com/tree-sitter/tree-sitter-java | `e10607b45ff745f5f876bfa3e94fbcc6b44bdc11` |
 | tree-sitter-javascript | https://github.com/tree-sitter/tree-sitter-javascript | `58404d8cf191d69f2674a8fd507bd5776f46cb11` |
