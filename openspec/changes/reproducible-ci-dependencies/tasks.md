@@ -14,6 +14,7 @@
 - [x] 2.6 Put the daemon-lifecycle `Node` fixture's designated initializers in declaration order and verify the test compiles with the supported Linux compiler.
 - [x] 2.7 Build Linux fuzzer dependencies with LTO disabled in a dedicated vcpkg triplet, then verify Clang links and executes every fuzzer smoke test.
 - [ ] 2.8 Build Windows dependencies as static libraries with the dynamic MSVC runtime so vcpkg selects its C-only LAPACK provider, then verify the default preset builds and passes.
+- [ ] 2.9 Align the Windows CGraph compiler with the dependency ABI and make UTC conversion target-platform-aware, then verify the hosted Windows build reaches its tests.
 
 ## 3. End-to-End Verification
 

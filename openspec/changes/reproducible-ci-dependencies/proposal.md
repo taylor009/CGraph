@@ -10,6 +10,7 @@ CGraph's GitHub Actions matrix currently fails during dependency checkout or ins
 - Scope the fuzzer job's Clang selection to the CGraph CMake preset so dependency builds retain vcpkg's native toolchain.
 - Give the Linux fuzzer job one vcpkg triplet that disables igraph's compiler-specific LTO objects at the GCC-to-Clang static-library boundary.
 - Give the Windows job one static-library/dynamic-CRT triplet so vcpkg selects its C-only LAPACK provider instead of an incompatible Fortran compiler.
+- Align the Windows CGraph compiler with that triplet's MSVC ABI and use the Windows UTC runtime entry points independently of compiler brand.
 - Declare the standard-library header used by graph-analysis ownership types instead of relying on igraph's transitive includes.
 - Give the Linux executable-path probe its own error-code name so the platform branch and shared path compile in one scope.
 - Order the daemon-lifecycle fixture's designated initializers to match the `Node` declaration required by C++20.
@@ -33,6 +34,6 @@ None.
 - Automation: `.github/workflows/ci.yml`, `CMakePresets.json`, `triplets/x64-linux-clang.cmake`, `triplets/x64-windows-static-md.cmake`
 - Test portability: `tests/fixtures/pack_context_parity/graph.json`, `tests/smoke/pack_context_parity_test.cpp`
 - Compiler portability: `tests/smoke/daemon_lifecycle_test.cpp`
-- Native compilation: `src/engine/analysis.cpp`, `src/cli/main.cpp`
+- Native compilation: `src/engine/analysis.cpp`, `src/engine/operation_stats.cpp`, `src/cli/main.cpp`
 - External systems: GitHub Actions runners, upstream tree-sitter repositories, and the vcpkg registry
 - Public APIs and CGraph runtime behavior: unchanged

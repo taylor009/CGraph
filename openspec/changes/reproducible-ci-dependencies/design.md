@@ -18,6 +18,8 @@ Keeping Clang scoped to CGraph exposes a compiler boundary in the updated igraph
 
 On the current Windows runner, vcpkg's dynamic-library LAPACK provider builds LAPACK 3.12.1 with LLVM Flang 22.1.3, which cannot parse the generated module files. The same vcpkg graph already selects its C-only `clapack` provider when dependency libraries are static, avoiding a Fortran compiler while preserving the LAPACK package contract.
 
+After the static provider succeeds, Ninja selects MinGW from the hosted runner's `PATH` while the `x64-windows-static-md` dependencies use the MSVC ABI. The build also exposes POSIX-only UTC conversion calls in both the durable-ledger implementation and the CLI's independent `today` calculation. The Windows job must select MSVC explicitly, and UTC conversion must branch on the target platform rather than assume POSIX APIs.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -74,12 +76,15 @@ Use a dedicated `x64-linux-clang` vcpkg triplet for the fuzzer job. The triplet 
 
 Use an `x64-windows-static-md` triplet for the Windows default job. Static dependency libraries trigger vcpkg's declared `clapack` provider while the dynamic CRT retains CGraph's normal MSVC runtime contract. Select the triplet through the existing matrix configure step; do not pin a Windows-only package version or change the runner.
 
+Initialize the hosted Windows MSVC environment and pass `cl` explicitly to CMake so CGraph and its vcpkg graph share one ABI. In the existing UTC ledger helpers, select `gmtime_s` and `_mkgmtime` for `_WIN32` and retain `gmtime_r` and `timegm` elsewhere. Make the CLI's `today` path reuse the ledger's canonical UTC formatter/parser instead of duplicating platform conversion calls.
+
 ## Risks / Trade-offs
 
 - **An upstream submodule becomes unavailable** → Pins remain immutable in the parent commit, and CI failure identifies the exact unavailable repository rather than compiling partial source.
 - **The newest vcpkg baseline introduces a different runner regression** → Advance only one manifest baseline and accept it only after the complete matrix passes; do not add per-runner exceptions.
 - **Native dependencies use compiler-specific LTO** → Disable igraph LTO only in the Linux Clang-consumer triplet; preserve the same versions, linkage, and native dependency compiler.
 - **The Windows runner's Fortran compiler rejects LAPACK sources** → Use static dependency linkage so vcpkg selects its supported C-only LAPACK provider, retaining the dynamic MSVC runtime.
+- **Ninja selects a compiler with a different ABI from the Windows dependency triplet** → Initialize and select MSVC explicitly before configuring CGraph.
 - **Recursive checkout costs additional network time** → The repository needs all eleven grammars to build the configured extractor set, so the cost reflects the actual source contract.
 - **Hosted runner images change later** → A manifest-pinned graph and complete matrix make drift visible; future repairs must again update the canonical baseline rather than add fallbacks.
 
