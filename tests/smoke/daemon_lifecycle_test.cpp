@@ -10,9 +10,10 @@ namespace {
 
 cgraph::GraphSnapshot sample_graph() {
   cgraph::GraphSnapshot graph;
-  graph.nodes.push_back(cgraph::Node{.id = "a", .label = "Alpha", .source_file = "a.cpp", .kind = "class",
+  graph.nodes.push_back(cgraph::Node{.id = "a", .label = "Alpha", .source_file = "a.cpp",
                                      .source_location = cgraph::SourceLocation{
-                                         .start_line = 10, .start_column = 1, .end_line = 25, .end_column = 2}});
+                                         .start_line = 10, .start_column = 1, .end_line = 25, .end_column = 2},
+                                     .kind = "class"});
   graph.nodes.push_back(cgraph::Node{.id = "b", .label = "Beta", .source_file = "b.cpp", .kind = "function"});
   graph.edges.push_back(cgraph::Edge{.source = "a", .target = "b", .relation = "CALLS"});
   graph.build_state = cgraph::BuildState::DeterministicReady;
