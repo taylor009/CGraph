@@ -10,7 +10,8 @@
 - [x] 2.2 Materialize the updated manifest dependency graph and verify CMake configuration succeeds against it.
 - [x] 2.3 Scope Clang selection to the CGraph fuzzer preset, leaving vcpkg dependency compiler selection unmodified, and verify the preset still selects a libFuzzer-capable Clang toolchain.
 - [x] 2.4 Add the direct `<memory>` dependency required by `analysis.cpp` and verify the updated igraph graph compiles without transitive-header assumptions.
-- [ ] 2.5 Remove the Linux-only error-code redeclaration in `current_executable_path` without changing path resolution, then verify the Linux translation unit compiles.
+- [x] 2.5 Remove the Linux-only error-code redeclaration in `current_executable_path` without changing path resolution, then verify the Linux translation unit compiles.
+- [ ] 2.6 Put the daemon-lifecycle `Node` fixture's designated initializers in declaration order and verify the test compiles with the supported Linux compiler.
 
 ## 3. End-to-End Verification
 

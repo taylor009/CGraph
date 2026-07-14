@@ -10,6 +10,7 @@ CGraph's GitHub Actions matrix currently fails during dependency checkout or ins
 - Scope the fuzzer job's Clang selection to the CGraph CMake preset so dependency builds retain vcpkg's native toolchain.
 - Declare the standard-library header used by graph-analysis ownership types instead of relying on igraph's transitive includes.
 - Give the Linux executable-path probe its own error-code name so the platform branch and shared path compile in one scope.
+- Order the daemon-lifecycle fixture's designated initializers to match the `Node` declaration required by C++20.
 - Normalize the committed retrieval fixture to repository-relative source paths so the now-running matrix observes the same token costs on every checkout.
 - Verify the normal and fuzzer jobs reach and pass CGraph's tests on the complete GitHub Actions matrix.
 - Non-goals: changing CGraph runtime behavior, replacing gitlinks with copied source, or adding platform-specific dependency fallbacks.
@@ -29,6 +30,7 @@ None.
 - Dependency metadata: `.gitmodules`, `vcpkg.json`
 - Automation: `.github/workflows/ci.yml`, `CMakePresets.json`
 - Test portability: `tests/fixtures/pack_context_parity/graph.json`, `tests/smoke/pack_context_parity_test.cpp`
+- Compiler portability: `tests/smoke/daemon_lifecycle_test.cpp`
 - Native compilation: `src/engine/analysis.cpp`, `src/cli/main.cpp`
 - External systems: GitHub Actions runners, upstream tree-sitter repositories, and the vcpkg registry
 - Public APIs and CGraph runtime behavior: unchanged

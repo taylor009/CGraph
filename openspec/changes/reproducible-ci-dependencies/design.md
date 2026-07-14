@@ -12,6 +12,8 @@ The updated igraph package no longer makes `<memory>` available transitively to 
 
 Linux compilation also exposes two `std::error_code ec` declarations in the same `current_executable_path` function scope: one in the Linux preprocessor branch and one in the shared argv fallback. macOS does not see the collision because its branch-local declaration is nested inside an `if` block.
 
+GCC then enforces C++20 designated-initializer order in the daemon-lifecycle fixture. `Node::source_location` is declared before `Node::kind`, while that fixture initializes `kind` first; Clang accepts the same code with a warning.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -61,6 +63,8 @@ Select `clang` and `clang++` with `CMAKE_C_COMPILER` and `CMAKE_CXX_COMPILER` in
 Include `<memory>` in `analysis.cpp`, where `std::unique_ptr` is used. The previous successful builds depended on an implementation detail of older igraph headers; making the dependency explicit keeps runtime behavior unchanged and lets the single updated manifest graph compile consistently.
 
 Give the Linux `/proc/self/exe` probe's error code a role-specific name. This preserves the existing executable-resolution behavior and lets the platform branch coexist with the shared argv canonicalization path without adding another code path.
+
+Order the daemon-lifecycle fixture's `source_location` and `kind` designators exactly as `Node` declares them. The fixture values and persistence assertion remain unchanged, while both supported compiler families accept the translation unit.
 
 ## Risks / Trade-offs
 
