@@ -27,7 +27,9 @@
       "inherits": "sanitizers",
       "binaryDir": "${sourceDir}/build/fuzzers",
       "cacheVariables": {
-        "CGRAPH_BUILD_FUZZERS": "ON"
+        "CGRAPH_BUILD_FUZZERS": "ON",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
       }
     }
   ],

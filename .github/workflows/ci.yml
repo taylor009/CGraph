@@ -40,9 +40,6 @@ jobs:
   fuzz-smoke:
     name: ubuntu-latest / fuzzers
     runs-on: ubuntu-latest
-    env:
-      CC: clang
-      CXX: clang++
 
     steps:
       - uses: actions/checkout@v4
