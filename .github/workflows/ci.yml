@@ -61,7 +61,7 @@ jobs:
           vcpkgJsonGlob: vcpkg.json
 
       - name: Configure fuzzers
-        run: cmake --preset fuzzers
+        run: cmake --preset fuzzers -DVCPKG_TARGET_TRIPLET=${VCPKG_DEFAULT_TRIPLET}
 
       - name: Build fuzzers
         run: cmake --build --preset fuzzers
