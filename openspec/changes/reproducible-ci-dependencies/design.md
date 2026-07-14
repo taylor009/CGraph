@@ -68,7 +68,7 @@ Give the Linux `/proc/self/exe` probe's error code a role-specific name. This pr
 
 Order the daemon-lifecycle fixture's `source_location` and `kind` designators exactly as `Node` declares them. The fixture values and persistence assertion remain unchanged, while both supported compiler families accept the translation unit.
 
-Use a dedicated `x64-linux-clang` vcpkg triplet for the fuzzer job. The triplet preserves the built-in Linux architecture and linkage contract and appends `-DIGRAPH_ENABLE_LTO=OFF` to port configuration, after the igraph port's automatic setting. Apply the same triplet environment to `run-vcpkg` and CGraph configuration so dependency installation and consumption share one ABI directory. This keeps GCC for OpenBLAS, Clang for CGraph and libFuzzer, and ordinary object code at their static-library boundary.
+Use a dedicated `x64-linux-clang` vcpkg triplet for the fuzzer job. The triplet preserves the built-in Linux architecture and linkage contract and appends `-DIGRAPH_ENABLE_LTO=OFF` to port configuration, after the igraph port's automatic setting. Export the triplet for `run-vcpkg` and pass it explicitly as CMake's `VCPKG_TARGET_TRIPLET` so dependency installation and consumption share one ABI directory. This keeps GCC for OpenBLAS, Clang for CGraph and libFuzzer, and ordinary object code at their static-library boundary.
 
 ## Risks / Trade-offs
 
