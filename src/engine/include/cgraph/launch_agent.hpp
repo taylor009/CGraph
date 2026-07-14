@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cgraph {
@@ -19,6 +20,11 @@ struct LaunchAgentSpec {
   bool run_at_load = false;                // start at load / login
   std::optional<int> start_interval;       // seconds between relaunches (supervisor only)
   std::filesystem::path working_directory; // optional; empty -> omitted
+  std::filesystem::path log_path;          // optional; StandardOut+ErrorPath when set
+  // EnvironmentVariables entries; empty -> dict omitted. launchd starts agents
+  // with a minimal environment, so anything a program needs beyond PATH-less
+  // absolute paths must be baked in here at install time.
+  std::vector<std::pair<std::string, std::string>> env;
 };
 
 // Render a launchd LaunchAgent plist (XML) for the given spec. Pure string

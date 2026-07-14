@@ -78,3 +78,7 @@ Native success is observable through:
 - the graph snapshot containing the merged fragment nodes and edges
 
 Failure is observable through rejected validation errors, failed enrichment counts, and unchanged graph snapshots. Hosts should retry by writing a corrected `chunk_NN.json` file with the same chunk index.
+
+## Reference Driver
+
+`integrations/skills/cgraph-enrich` is the reference host driver for this contract: it runs the plan → author → atomic drop → verify loop described above. Install it (and the query-routing `cgraph` skill) into host skill directories with `cgraph skills install`; keep pending enrichment drained on a schedule with `cgraph drain install` (status-gated, chunk-capped, host CLI dispatch — no model logic in the binary).

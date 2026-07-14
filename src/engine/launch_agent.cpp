@@ -87,6 +87,21 @@ std::string render_launch_agent(const LaunchAgentSpec& spec) {
     out << "  <key>WorkingDirectory</key>\n"
         << "  <string>" << xml_escape(spec.working_directory.string()) << "</string>\n";
   }
+  if (!spec.log_path.empty()) {
+    out << "  <key>StandardOutPath</key>\n"
+        << "  <string>" << xml_escape(spec.log_path.string()) << "</string>\n"
+        << "  <key>StandardErrorPath</key>\n"
+        << "  <string>" << xml_escape(spec.log_path.string()) << "</string>\n";
+  }
+  if (!spec.env.empty()) {
+    out << "  <key>EnvironmentVariables</key>\n"
+        << "  <dict>\n";
+    for (const auto& [key, value] : spec.env) {
+      out << "    <key>" << xml_escape(key) << "</key>\n"
+          << "    <string>" << xml_escape(value) << "</string>\n";
+    }
+    out << "  </dict>\n";
+  }
   out << "</dict>\n"
       << "</plist>\n";
   return out.str();

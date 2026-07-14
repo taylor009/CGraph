@@ -258,9 +258,22 @@ at the repo root:
 ```
 
 Verify with `/mcp` inside Claude Code; you should see `cgraph` connected with its
-tools. This repo also ships a `cgraph` skill (`integrations/skills/cgraph/`) that
-tells the agent to reach for these tools first for codebase-structure questions —
-copy it into your agent's skills directory to enable it.
+tools. This repo also ships two host skills under `integrations/skills/`:
+`cgraph` (reach for the graph tools first on codebase-structure questions) and
+`cgraph-enrich` (the semantic-enrichment loop that drains
+`enrichment_pending`). Install both into your host's skill directories with:
+
+```sh
+build/default/src/cli/cgraph skills install     # symlinks into ~/.claude/skills + ~/.agents/skills
+build/default/src/cli/cgraph skills status      # shows each link and its target
+```
+
+To keep enrichment from accumulating unattended, install the scheduled drainer
+(status-gated: it costs nothing when `enrichment_pending` is 0):
+
+```sh
+build/default/src/cli/cgraph drain install      # daily launchd sweep over tracked repos
+```
 
 ### Codex CLI
 

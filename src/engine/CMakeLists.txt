@@ -12,6 +12,7 @@ add_library(cgraph_engine STATIC
   cpp_extractor.cpp
   detect.cpp
   engine.cpp
+  enrich_drainer.cpp
   extractor.cpp
   export_json.cpp
   file_cache.cpp
@@ -41,6 +42,7 @@ add_library(cgraph_engine STATIC
   semantic_fragment_validation.cpp
   semantic_ingest.cpp
   semantic_orchestration.cpp
+  skills_install.cpp
   tsconfig_aliases.cpp)
 
 add_library(cgraph::engine ALIAS cgraph_engine)

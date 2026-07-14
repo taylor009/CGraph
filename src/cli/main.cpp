@@ -5,6 +5,7 @@
 #include "cgraph/daemon_server.hpp"
 #include "cgraph/daemon_supervisor.hpp"
 #include "cgraph/engine.hpp"
+#include "cgraph/enrich_drainer.hpp"
 #include "cgraph/export_json.hpp"
 #include "cgraph/fragment_json.hpp"
 #include "cgraph/launch_agent.hpp"
@@ -13,6 +14,7 @@
 #include "cgraph/protocol.hpp"
 #include "cgraph/seam.hpp"
 #include "cgraph/semantic_orchestration.hpp"
+#include "cgraph/skills_install.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -52,7 +54,11 @@ void print_usage() {
       "  cgraph seam query --graph FUSED.json <query|path|explain|impact|context> [PARAMS_JSON]\n"
       "        run a read op against a fused seam graph (cross-service); read-only\n"
       "  cgraph daemon <install|sync|status|uninstall> [--search-root DIR] [--exclude DIR]\n"
-      "        keep a resident, auto-refreshing graphd per tracked repo (login LaunchAgents)\n";
+      "        keep a resident, auto-refreshing graphd per tracked repo (login LaunchAgents)\n"
+      "  cgraph skills <install|status|uninstall> [--source DIR] [--skills-dir DIR ...]\n"
+      "        symlink the repo's host skills (integrations/skills/*) into host skill dirs\n"
+      "  cgraph drain <install|status|uninstall> [--interval SECONDS] [--chunk-cap N]\n"
+      "        scheduled LaunchAgent that drains pending semantic enrichment via the host CLI\n";
 }
 
 struct Args {
@@ -587,6 +593,170 @@ int run_daemon_command(int argc, char** argv) {
   return 0;
 }
 
+// cgraph skills <install|status|uninstall> [--source DIR] [--skills-dir DIR ...]
+// --source overrides the walk-up resolution of <repo>/integrations/skills;
+// --skills-dir (repeatable) replaces the default host skill dirs.
+int run_skills_command(int argc, char** argv) {
+  const std::string sub = argc >= 3 ? argv[2] : "";
+  if (sub != "install" && sub != "status" && sub != "uninstall") {
+    std::cerr << "usage: cgraph skills <install|status|uninstall> [--source DIR] [--skills-dir DIR ...]\n";
+    return 2;
+  }
+
+  cgraph::SkillsConfig config;
+  for (int index = 3; index < argc; ++index) {
+    const std::string arg = argv[index];
+    if (arg == "--source" && index + 1 < argc) {
+      config.skills_source_dir = argv[++index];
+    } else if (arg == "--skills-dir" && index + 1 < argc) {
+      config.host_skill_dirs.emplace_back(argv[++index]);
+    } else {
+      std::cerr << "cgraph skills: unknown argument: " << arg << '\n';
+      return 2;
+    }
+  }
+  if (config.skills_source_dir.empty()) {
+    config.skills_source_dir =
+        cgraph::resolve_skills_source(current_executable_path(argv[0]), std::filesystem::current_path());
+  }
+  if (config.skills_source_dir.empty()) {
+    std::cerr << "cgraph skills " << sub
+              << ": could not locate integrations/skills above the binary or cwd; pass --source DIR\n";
+    return 2;
+  }
+  if (config.host_skill_dirs.empty()) {
+    config.host_skill_dirs = cgraph::default_host_skill_dirs();
+  }
+  if (config.host_skill_dirs.empty()) {
+    std::cerr << "cgraph skills " << sub
+              << ": no host skill directories found (~/.claude, ~/.agents); pass --skills-dir DIR\n";
+    return 2;
+  }
+
+  const auto describe = [](cgraph::SkillLinkState state) {
+    switch (state) {
+      case cgraph::SkillLinkState::kOk: return "[ok]      ";
+      case cgraph::SkillLinkState::kMissing: return "[missing] ";
+      case cgraph::SkillLinkState::kWrongTarget: return "[wrong]   ";
+      case cgraph::SkillLinkState::kNotSymlink: return "[occupied]";
+    }
+    return "[?]       ";
+  };
+  const auto print_rows = [&describe](const std::vector<cgraph::SkillLinkStatus>& rows) {
+    for (const auto& row : rows) {
+      std::cout << "  " << describe(row.state) << " " << row.link.string();
+      if (row.state == cgraph::SkillLinkState::kOk || row.state == cgraph::SkillLinkState::kWrongTarget) {
+        std::cout << " -> " << row.actual_target.string();
+      }
+      std::cout << '\n';
+    }
+  };
+
+  if (sub == "status") {
+    std::cout << "skills source: " << config.skills_source_dir.string() << '\n';
+    print_rows(cgraph::skills_status(config));
+    return 0;
+  }
+  if (sub == "install") {
+    const bool ok = cgraph::skills_install(config);
+    print_rows(cgraph::skills_status(config));
+    if (!ok) {
+      std::cerr << "cgraph skills install: some paths are occupied by files this tool does not own\n";
+      return 1;
+    }
+    std::cout << "installed " << cgraph::kHostSkillNames.size() << " skill(s) from "
+              << config.skills_source_dir.string() << '\n';
+    return 0;
+  }
+  // uninstall
+  const bool ok = cgraph::skills_uninstall(config);
+  print_rows(cgraph::skills_status(config));
+  if (!ok) {
+    std::cerr << "cgraph skills uninstall: some paths were left (not owned by this source)\n";
+    return 1;
+  }
+  std::cout << "uninstalled\n";
+  return 0;
+}
+
+// cgraph drain <install|status|uninstall> [--interval SECONDS] [--chunk-cap N]
+//              [--script PATH] [--launch-agents-dir DIR] [--client PATH]
+int run_drain_command(int argc, char** argv) {
+  const std::string sub = argc >= 3 ? argv[2] : "";
+  if (sub != "install" && sub != "status" && sub != "uninstall") {
+    std::cerr << "usage: cgraph drain <install|status|uninstall> [--interval SECONDS] "
+                 "[--chunk-cap N] [--script PATH] [--launch-agents-dir DIR] [--client PATH]\n";
+    return 2;
+  }
+
+  cgraph::DrainerConfig config;
+  config.launch_agents_dir = cgraph::default_launch_agents_dir();
+  const auto self = current_executable_path(argv[0]);
+  config.cgraph_binary = self;
+  config.client_binary = self.parent_path().parent_path() / "client" / "cgraph-client";
+
+  for (int index = 3; index < argc; ++index) {
+    const std::string arg = argv[index];
+    if (arg == "--interval" && index + 1 < argc) {
+      config.interval_seconds = std::stoi(argv[++index]);
+    } else if (arg == "--chunk-cap" && index + 1 < argc) {
+      config.chunk_cap = std::stoi(argv[++index]);
+    } else if (arg == "--script" && index + 1 < argc) {
+      config.script_path = argv[++index];
+    } else if (arg == "--launch-agents-dir" && index + 1 < argc) {
+      config.launch_agents_dir = argv[++index];
+    } else if (arg == "--client" && index + 1 < argc) {
+      config.client_binary = argv[++index];
+    } else {
+      std::cerr << "cgraph drain: unknown argument: " << arg << '\n';
+      return 2;
+    }
+  }
+  if (config.script_path.empty()) {
+    config.script_path = cgraph::resolve_drain_script(self, std::filesystem::current_path());
+  }
+  if (config.script_path.empty()) {
+    std::cerr << "cgraph drain " << sub
+              << ": could not locate integrations/always-on/cgraph-enrich-drain.sh; pass --script PATH\n";
+    return 2;
+  }
+
+  if (sub == "status") {
+    std::cout << (cgraph::drainer_installed(config) ? "installed" : "not installed") << " ("
+              << cgraph::kDrainerLabel << ")\n"
+              << "  script: " << config.script_path.string() << '\n';
+    return 0;
+  }
+  if (sub == "install") {
+    // Install runs in the user's interactive environment, the only place the
+    // host CLI is reliably on PATH (launchd + login-shell PATH both miss
+    // .zshrc-managed shim dirs). Bake the resolved path into the agent's env.
+    config.host_cli = cgraph::resolve_host_cli().string();
+    if (config.host_cli.empty()) {
+      std::cerr << "cgraph drain install: warning: host CLI not resolvable from this "
+                   "environment; the sweep will retry resolution at runtime\n";
+    }
+    if (!cgraph::drainer_install(config)) {
+      std::cerr << "cgraph drain install: failed (check launchctl and paths)\n";
+      return 1;
+    }
+    std::cout << "installed " << cgraph::kDrainerLabel << " (every " << config.interval_seconds
+              << "s, cap " << config.chunk_cap << " chunks/repo/run";
+    if (!config.host_cli.empty()) {
+      std::cout << ", host CLI " << config.host_cli;
+    }
+    std::cout << ")\n";
+    return 0;
+  }
+  // uninstall
+  if (!cgraph::drainer_uninstall(config)) {
+    std::cerr << "cgraph drain uninstall: plist could not be removed\n";
+    return 1;
+  }
+  std::cout << "uninstalled " << cgraph::kDrainerLabel << '\n';
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -630,6 +800,12 @@ int main(int argc, char** argv) {
     }
     if (first == "daemon") {
       return run_daemon_command(argc, argv);
+    }
+    if (first == "skills") {
+      return run_skills_command(argc, argv);
+    }
+    if (first == "drain") {
+      return run_drain_command(argc, argv);
     }
   }
 

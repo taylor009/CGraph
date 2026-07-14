@@ -637,6 +637,30 @@ cgraph_enable_sanitizers(cgraph_daemon_supervisor_test)
 
 add_test(NAME cgraph_daemon_supervisor_test COMMAND cgraph_daemon_supervisor_test)
 
+add_executable(cgraph_enrich_drainer_test
+  enrich_drainer_test.cpp)
+
+target_link_libraries(cgraph_enrich_drainer_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_enrich_drainer_test)
+cgraph_enable_sanitizers(cgraph_enrich_drainer_test)
+
+add_test(NAME cgraph_enrich_drainer_test COMMAND cgraph_enrich_drainer_test)
+
+add_executable(cgraph_skills_install_test
+  skills_install_test.cpp)
+
+target_link_libraries(cgraph_skills_install_test
+  PRIVATE
+    cgraph::engine)
+
+cgraph_set_warnings(cgraph_skills_install_test)
+cgraph_enable_sanitizers(cgraph_skills_install_test)
+
+add_test(NAME cgraph_skills_install_test COMMAND cgraph_skills_install_test)
+
 add_executable(cgraph_protocol_test
   protocol_test.cpp)
 
