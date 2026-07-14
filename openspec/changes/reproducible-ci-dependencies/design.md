@@ -20,6 +20,8 @@ On the current Windows runner, vcpkg's dynamic-library LAPACK provider builds LA
 
 After the static provider succeeds, Ninja selects MinGW from the hosted runner's `PATH` while the `x64-windows-static-md` dependencies use the MSVC ABI. The build also exposes POSIX-only UTC conversion calls in both the durable-ledger implementation and the CLI's independent `today` calculation. The Windows job must select MSVC explicitly, and UTC conversion must branch on the target platform rather than assume POSIX APIs.
 
+The resulting MSVC build reaches the client-runtime fixture, where daemon discovery setup calls POSIX-only `setenv` and `unsetenv`. The test must mutate the real process environment through `_putenv_s` on Windows and the POSIX APIs elsewhere, while continuing to exercise production `std::getenv` resolution.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -77,6 +79,8 @@ Use a dedicated `x64-linux-clang` vcpkg triplet for the fuzzer job. The triplet 
 Use an `x64-windows-static-md` triplet for the Windows default job. Static dependency libraries trigger vcpkg's declared `clapack` provider while the dynamic CRT retains CGraph's normal MSVC runtime contract. Select the triplet through the existing matrix configure step; do not pin a Windows-only package version or change the runner.
 
 Initialize the hosted Windows MSVC environment and pass `cl` explicitly to CMake so CGraph and its vcpkg graph share one ABI. In the existing UTC ledger helpers, select `gmtime_s` and `_mkgmtime` for `_WIN32` and retain `gmtime_r` and `timegm` elsewhere. Make the CLI's `today` path reuse the ledger's canonical UTC formatter/parser instead of duplicating platform conversion calls.
+
+Keep the client-runtime environment test real and compiler-portable: use `_putenv_s(name, value)` and an empty value to set/remove variables on Windows, and `setenv`/`unsetenv` on POSIX. Assert that mutation succeeds before testing precedence so a failed test setup cannot masquerade as production behavior.
 
 ## Risks / Trade-offs
 
