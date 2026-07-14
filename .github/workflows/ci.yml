@@ -8,6 +8,8 @@ jobs:
   build:
     name: ${{ matrix.os }} / ${{ matrix.preset }}
     runs-on: ${{ matrix.os }}
+    env:
+      VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/triplets
     strategy:
       fail-fast: false
       matrix:
@@ -16,6 +18,11 @@ jobs:
         exclude:
           - os: windows-latest
             preset: sanitizers
+        include:
+          - vcpkg_target_arg: ""
+          - os: windows-latest
+            preset: default
+            vcpkg_target_arg: -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
 
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +36,7 @@ jobs:
           vcpkgJsonGlob: vcpkg.json
 
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }} ${{ matrix.vcpkg_target_arg }}
 
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
