@@ -182,7 +182,11 @@ constexpr std::array<DaemonOp, 7> kSubstantiveOps = {
 std::string format_iso8601_utc(WallClock::time_point tp) {
   const std::time_t t = WallClock::to_time_t(tp);
   std::tm tm{};
+#ifdef _WIN32
+  ::gmtime_s(&tm, &t);
+#else
   ::gmtime_r(&t, &tm);
+#endif
   char buf[32];
   std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
   return buf;
@@ -202,7 +206,11 @@ std::optional<WallClock::time_point> parse_iso8601_utc(std::string_view text) {
   tm.tm_hour = h;
   tm.tm_min = mi;
   tm.tm_sec = s;
+#ifdef _WIN32
+  const std::time_t t = ::_mkgmtime(&tm);
+#else
   const std::time_t t = ::timegm(&tm);
+#endif
   if (t == static_cast<std::time_t>(-1)) {
     return std::nullopt;
   }
