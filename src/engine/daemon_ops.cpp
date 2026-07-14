@@ -1346,6 +1346,7 @@ struct StructuralIntent {
       {"enrichment_plans_run", state.enrichment_plans_run},
       {"watching", state.watching},
       {"incremental_updates", state.incremental_updates},
+      {"unextracted", state.unextracted},
       {"ops", op_stats_json(state.op_stats)},
   };
   // Modeled cache saving = files_reused x mean(per-file extract time) from the

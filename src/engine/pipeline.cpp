@@ -1,6 +1,7 @@
 #include "cgraph/pipeline.hpp"
 
 #include "cgraph/analysis.hpp"
+#include "cgraph/configured_extractors.hpp"
 #include "cgraph/dedup.hpp"
 #include "cgraph/detect.hpp"
 #include "cgraph/export_json.hpp"
@@ -29,6 +30,7 @@ PipelineResult run_one_shot(const std::filesystem::path& root) {
   result.stats.files_total = files.size();
   result.stats.files_extracted = files.size();
   result.stats.files_cache_hit = 0;
+  result.stats.unextracted = unextracted_counts(files);
 
   std::vector<Fragment> fragments;
   std::vector<RawCall> raw_calls;

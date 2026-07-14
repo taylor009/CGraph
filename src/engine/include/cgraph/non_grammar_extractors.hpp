@@ -11,6 +11,10 @@ namespace cgraph {
     DetectedLanguage language,
     const ExtractionContext& context);
 
+// Whether extract_non_grammar_language handles this language (without running
+// an extraction). Kept in sync with its dispatch switch.
+[[nodiscard]] bool handles_non_grammar_language(DetectedLanguage language);
+
 [[nodiscard]] ExtractionResult extract_msbuild(const ExtractionContext& context);
 [[nodiscard]] ExtractionResult extract_delphi_form(const ExtractionContext& context);
 [[nodiscard]] ExtractionResult extract_apex(const ExtractionContext& context);

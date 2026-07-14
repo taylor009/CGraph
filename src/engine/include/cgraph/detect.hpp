@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace cgraph {
@@ -36,6 +37,9 @@ struct DetectedFile {
 };
 
 [[nodiscard]] DetectedLanguage detect_language(const std::filesystem::path& path);
+// Stable lowercase display name for a detected language ("go", "csharp",
+// "php-blade", ...). Used as the key in the `unextracted` coverage maps.
+[[nodiscard]] std::string_view language_name(DetectedLanguage language);
 [[nodiscard]] std::vector<DetectedFile> detect_project_files(const std::filesystem::path& root);
 
 }  // namespace cgraph

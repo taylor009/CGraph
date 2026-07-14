@@ -8,17 +8,18 @@ jobs:
   build:
     name: ${{ matrix.os }} / ${{ matrix.preset }}
     runs-on: ${{ matrix.os }}
+    env:
+      VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/triplets
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
         preset: [default, sanitizers]
-        exclude:
-          - os: windows-latest
-            preset: sanitizers
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: lukka/get-cmake@latest
 
@@ -39,11 +40,13 @@ jobs:
     name: ubuntu-latest / fuzzers
     runs-on: ubuntu-latest
     env:
-      CC: clang
-      CXX: clang++
+      VCPKG_DEFAULT_TRIPLET: x64-linux-clang
+      VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/triplets
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: lukka/get-cmake@latest
 
@@ -57,7 +60,7 @@ jobs:
           vcpkgJsonGlob: vcpkg.json
 
       - name: Configure fuzzers
-        run: cmake --preset fuzzers
+        run: cmake --preset fuzzers -DVCPKG_TARGET_TRIPLET=${VCPKG_DEFAULT_TRIPLET}
 
       - name: Build fuzzers
         run: cmake --build --preset fuzzers

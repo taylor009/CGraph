@@ -21,11 +21,34 @@ int main() {
   std::filesystem::remove_all(out);
 
   write_file(root / "main.py", "def main():\n    return helper()\n\ndef helper():\n    return 1\n");
+  write_file(root / "service.go",
+             "package main\n\ntype Service struct{}\n\nfunc (s *Service) Run() {\n\thelper()\n}\n\nfunc helper() {}\n");
+  // Detected but extractorless: must surface in the unextracted coverage map,
+  // not vanish behind a per-file warning.
+  write_file(root / "legacy.cs", "class Legacy { void Run() {} }\n");
 
   const auto result = cgraph::run_one_shot(root);
-  if (result.file_count != 1 || result.graph.nodes.empty()) {
+  if (result.file_count != 3 || result.graph.nodes.empty()) {
     std::filesystem::remove_all(root);
     return 1;
+  }
+
+  // The Go file produced real symbols (type + functions), not just a file node.
+  bool go_symbol_seen = false;
+  for (const auto& node : result.graph.nodes) {
+    if (node.label == "Service" || node.label == "Run") {
+      go_symbol_seen = true;
+      break;
+    }
+  }
+  if (!go_symbol_seen) {
+    std::filesystem::remove_all(root);
+    return 6;
+  }
+
+  if (result.stats.unextracted.size() != 1 || result.stats.unextracted.at("csharp") != 1) {
+    std::filesystem::remove_all(root);
+    return 7;
   }
 
   // Layer A: a real build records per-phase timings and counters at the seam.
@@ -41,7 +64,7 @@ int main() {
     return 3;  // counters must match the resulting snapshot
   }
   // A cold one-shot build extracts every file and reuses none.
-  if (stats.files_total != 1 || stats.files_extracted != 1 || stats.files_cache_hit != 0 ||
+  if (stats.files_total != 3 || stats.files_extracted != 3 || stats.files_cache_hit != 0 ||
       result.graph.cache_hit_rate != 0.0) {
     std::filesystem::remove_all(root);
     return 4;
@@ -49,7 +72,8 @@ int main() {
   // stats.json body is well-formed and omits the saving estimate on a cold build.
   const auto stats_json = cgraph::build_stats_json(stats);
   if (stats_json["node_count"] != result.graph.nodes.size() ||
-      stats_json.contains("cache_saved_ms_estimate")) {
+      stats_json.contains("cache_saved_ms_estimate") ||
+      stats_json["unextracted"]["csharp"] != 1) {
     std::filesystem::remove_all(root);
     return 5;
   }
