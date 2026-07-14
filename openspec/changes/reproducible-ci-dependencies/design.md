@@ -4,6 +4,8 @@ The parent repository index contains eleven mode-`160000` tree-sitter gitlinks, 
 
 The vcpkg manifest already provides a single `builtin-baseline`. The current baseline resolves native BLAS/LAPACK dependencies that fail on the supported runner matrix before CGraph tests execute.
 
+Once dependency repair allows tests to execute, the committed retrieval fixture exposes a latent portability defect: its `source_file` fields contain one developer's absolute checkout path. Because context packing prices on-disk source slices, missing CI snippets change the measured selection result. The fixture must store repository-relative paths and the test must resolve them through its compile-time repository root before invoking production packing code.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -39,6 +41,10 @@ Alternative considered: pin or override ports per runner. Rejected because platf
 Before implementation, preserve the current failing evidence from GitHub Actions: checkout cannot resolve `vendor/tree-sitter/core`, dependency installation fails, and no CGraph test runs. After implementation, validate locally that every gitlink has a matching `.gitmodules` entry and materializes at its parent-index commit, then configure, build, and run the applicable native tests. The final acceptance gate is the unmodified GitHub Actions matrix reaching and passing every intended CGraph test.
 
 This metadata change has no useful isolated unit-test seam. Its direct test is a fresh recursive checkout plus the real package/build/test flow.
+
+### Keep committed retrieval inputs checkout-portable
+
+Store fixture `source_file` values relative to the repository and reject absolute paths in the parity executable. Rebase each path through the existing `CGRAPH_REPO_ROOT` test definition before publishing the snapshot to the production request path. This retains real source-slice accounting without embedding a host path or adding runtime fallback behavior.
 
 ## Risks / Trade-offs
 
