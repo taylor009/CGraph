@@ -11,7 +11,8 @@
 - [x] 2.3 Scope Clang selection to the CGraph fuzzer preset, leaving vcpkg dependency compiler selection unmodified, and verify the preset still selects a libFuzzer-capable Clang toolchain.
 - [x] 2.4 Add the direct `<memory>` dependency required by `analysis.cpp` and verify the updated igraph graph compiles without transitive-header assumptions.
 - [x] 2.5 Remove the Linux-only error-code redeclaration in `current_executable_path` without changing path resolution, then verify the Linux translation unit compiles.
-- [ ] 2.6 Put the daemon-lifecycle `Node` fixture's designated initializers in declaration order and verify the test compiles with the supported Linux compiler.
+- [x] 2.6 Put the daemon-lifecycle `Node` fixture's designated initializers in declaration order and verify the test compiles with the supported Linux compiler.
+- [ ] 2.7 Build Linux fuzzer dependencies with LTO disabled in a dedicated vcpkg triplet, then verify Clang links and executes every fuzzer smoke test.
 
 ## 3. End-to-End Verification
 

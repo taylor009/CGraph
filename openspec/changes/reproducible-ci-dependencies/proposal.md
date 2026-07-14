@@ -8,6 +8,7 @@ CGraph's GitHub Actions matrix currently fails during dependency checkout or ins
 - Make every CI checkout recursively materialize those declared submodules.
 - Advance the single `builtin-baseline` in `vcpkg.json` to a revision that resolves and builds on Linux, macOS, and Windows.
 - Scope the fuzzer job's Clang selection to the CGraph CMake preset so dependency builds retain vcpkg's native toolchain.
+- Give the Linux fuzzer job one vcpkg triplet that disables igraph's compiler-specific LTO objects at the GCC-to-Clang static-library boundary.
 - Declare the standard-library header used by graph-analysis ownership types instead of relying on igraph's transitive includes.
 - Give the Linux executable-path probe its own error-code name so the platform branch and shared path compile in one scope.
 - Order the daemon-lifecycle fixture's designated initializers to match the `Node` declaration required by C++20.
@@ -28,7 +29,7 @@ None.
 ## Impact
 
 - Dependency metadata: `.gitmodules`, `vcpkg.json`
-- Automation: `.github/workflows/ci.yml`, `CMakePresets.json`
+- Automation: `.github/workflows/ci.yml`, `CMakePresets.json`, `triplets/x64-linux-clang.cmake`
 - Test portability: `tests/fixtures/pack_context_parity/graph.json`, `tests/smoke/pack_context_parity_test.cpp`
 - Compiler portability: `tests/smoke/daemon_lifecycle_test.cpp`
 - Native compilation: `src/engine/analysis.cpp`, `src/cli/main.cpp`

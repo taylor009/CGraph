@@ -14,6 +14,8 @@ Linux compilation also exposes two `std::error_code ec` declarations in the same
 
 GCC then enforces C++20 designated-initializer order in the daemon-lifecycle fixture. `Node::source_location` is declared before `Node::kind`, while that fixture initializes `kind` first; Clang accepts the same code with a warning.
 
+Keeping Clang scoped to CGraph exposes a compiler boundary in the updated igraph port. The port enables link-time optimization automatically, so vcpkg's native GCC emits compiler-specific LTO objects that the Clang fuzzer link cannot consume. OpenBLAS must retain the native compiler, so fuzzer dependencies need a Linux triplet that disables igraph LTO at package creation.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -66,10 +68,13 @@ Give the Linux `/proc/self/exe` probe's error code a role-specific name. This pr
 
 Order the daemon-lifecycle fixture's `source_location` and `kind` designators exactly as `Node` declares them. The fixture values and persistence assertion remain unchanged, while both supported compiler families accept the translation unit.
 
+Use a dedicated `x64-linux-clang` vcpkg triplet for the fuzzer job. The triplet preserves the built-in Linux architecture and linkage contract and appends `-DIGRAPH_ENABLE_LTO=OFF` to port configuration, after the igraph port's automatic setting. Apply the same triplet environment to `run-vcpkg` and CGraph configuration so dependency installation and consumption share one ABI directory. This keeps GCC for OpenBLAS, Clang for CGraph and libFuzzer, and ordinary object code at their static-library boundary.
+
 ## Risks / Trade-offs
 
 - **An upstream submodule becomes unavailable** → Pins remain immutable in the parent commit, and CI failure identifies the exact unavailable repository rather than compiling partial source.
 - **The newest vcpkg baseline introduces a different runner regression** → Advance only one manifest baseline and accept it only after the complete matrix passes; do not add per-runner exceptions.
+- **Native dependencies use compiler-specific LTO** → Disable igraph LTO only in the Linux Clang-consumer triplet; preserve the same versions, linkage, and native dependency compiler.
 - **Recursive checkout costs additional network time** → The repository needs all eleven grammars to build the configured extractor set, so the cost reflects the actual source contract.
 - **Hosted runner images change later** → A manifest-pinned graph and complete matrix make drift visible; future repairs must again update the canonical baseline rather than add fallbacks.
 
