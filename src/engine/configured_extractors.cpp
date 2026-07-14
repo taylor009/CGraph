@@ -3,6 +3,7 @@
 #include "cgraph/cpp_extractor.hpp"
 #include "cgraph/javascript_extractor.hpp"
 #include "cgraph/non_grammar_extractors.hpp"
+#include "cgraph/normalize.hpp"
 #include "cgraph/python_extractor.hpp"
 
 namespace cgraph {
@@ -10,6 +11,7 @@ namespace {
 
 extern "C" const TSLanguage* tree_sitter_c();
 extern "C" const TSLanguage* tree_sitter_cpp();
+extern "C" const TSLanguage* tree_sitter_go();
 extern "C" const TSLanguage* tree_sitter_groovy();
 extern "C" const TSLanguage* tree_sitter_java();
 extern "C" const TSLanguage* tree_sitter_javascript();
@@ -112,6 +114,78 @@ extern "C" const TSLanguage* tree_sitter_tsx();
   };
 }
 
+[[nodiscard]] std::string go_node_text(const TSNode& node, std::string_view source) {
+  const auto start = ts_node_start_byte(node);
+  const auto end = ts_node_end_byte(node);
+  if (start >= end || end > source.size()) {
+    return {};
+  }
+  return std::string(source.substr(start, end - start));
+}
+
+// `import "net/http"` / grouped `import ( alias "pkg/path" )`: each import_spec's
+// quoted path becomes a module stub node + a file -> module `imports` edge, the
+// same shape cpp_import_handler emits. resolve_imports matches the spec against
+// project files by path suffix; stdlib and external module paths match nothing
+// and are dropped, leaving no dangling edge.
+void go_import_handler(const TSNode& node, const ExtractionContext& context, Fragment& fragment) {
+  if (std::string_view(ts_node_type(node)) != "import_spec") {
+    return;
+  }
+  const auto path = ts_node_child_by_field_name(node, "path", 4);
+  if (ts_node_is_null(path)) {
+    return;
+  }
+  auto spec = go_node_text(path, context.source);
+  if (spec.size() >= 2 && (spec.front() == '"' || spec.front() == '`')) {
+    spec = spec.substr(1, spec.size() - 2);  // strip the surrounding "" or ``
+  }
+  if (spec.empty()) {
+    return;
+  }
+
+  const auto module_id = make_id(spec);
+  fragment.nodes.push_back(Node{
+      .id = module_id,
+      .label = spec,
+      .source_location = SourceLocation{.start_line = 1, .end_line = 1},
+      .kind = "module",
+      .confidence = Confidence::Extracted,
+      .properties = {{"import_path", spec}},
+  });
+  fragment.edges.push_back(Edge{
+      .source = make_id(context.source_file),
+      .target = module_id,
+      .relation = "imports",
+      .confidence = Confidence::Extracted,
+  });
+}
+
+[[nodiscard]] LanguageConfig go_config() {
+  LanguageConfig config{
+      .name = "go",
+      .grammar_name = "tree-sitter-go",
+      .extensions = {".go"},
+      // Named types (`type Server struct {...}`, `type Handler interface {...}`,
+      // aliases) are all declared through type_spec / type_alias; they become
+      // "type" nodes rather than guessing class-ness per underlying type.
+      .function_node_types = {"function_declaration", "method_declaration"},
+      .type_node_types = {"type_spec", "type_alias"},
+      .import_node_types = {"import_spec"},
+      .call_node_types = {"call_expression"},
+      .name_fields = {"name"},
+      .body_fields = {"body"},
+      .call_accessor_fields = {"function"},
+      // `pkg.Func()` / `recv.Method()` targets are selector_expressions; record
+      // the bare field name as a member call so resolution stays same-file (the
+      // receiver/package is not resolved by a project-wide name guess).
+      .call_member_node_types = {"selector_expression"},
+      .call_member_field = "field",
+  };
+  config.import_handler = go_import_handler;
+  return config;
+}
+
 [[nodiscard]] LanguageConfig groovy_config() {
   return LanguageConfig{
       .name = "groovy",
@@ -135,6 +209,8 @@ const TSLanguage* tree_sitter_language_for(DetectedLanguage language) {
       return tree_sitter_c();
     case DetectedLanguage::Cpp:
       return tree_sitter_cpp();
+    case DetectedLanguage::Go:
+      return tree_sitter_go();
     case DetectedLanguage::Groovy:
       return tree_sitter_groovy();
     case DetectedLanguage::Java:
@@ -164,6 +240,8 @@ std::optional<LanguageConfig> config_for_language(DetectedLanguage language) {
       return c_config();
     case DetectedLanguage::Cpp:
       return cpp_config();
+    case DetectedLanguage::Go:
+      return go_config();
     case DetectedLanguage::Groovy:
       return groovy_config();
     case DetectedLanguage::Java:
@@ -214,6 +292,24 @@ std::optional<ExtractionResult> extract_configured_language(
     return extract_tsx(context);
   }
   return extract_with_config(grammar, *config, context);
+}
+
+bool has_registered_extractor(DetectedLanguage language) {
+  if (handles_non_grammar_language(language)) {
+    return true;
+  }
+  return tree_sitter_language_for(language) != nullptr && config_for_language(language).has_value();
+}
+
+std::map<std::string, std::size_t> unextracted_counts(std::span<const DetectedFile> files) {
+  std::map<std::string, std::size_t> counts;
+  for (const auto& file : files) {
+    if (file.language == DetectedLanguage::Unknown || has_registered_extractor(file.language)) {
+      continue;
+    }
+    ++counts[std::string(language_name(file.language))];
+  }
+  return counts;
 }
 
 }  // namespace cgraph

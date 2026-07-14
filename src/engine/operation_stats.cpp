@@ -110,6 +110,7 @@ nlohmann::json build_stats_json(const BuildStats& stats) {
       {"cache_hit_rate", cache_hit_rate(stats.files_cache_hit, stats.files_total)},
       {"node_count", stats.nodes},
       {"edge_count", stats.edges},
+      {"unextracted", stats.unextracted},
   };
   // Modeled, labeled, and omitted when it cannot be honestly formed.
   if (const auto saved = modeled_cache_saved_ms(stats.files_cache_hit, stats.files_extracted, stats.extract_ms)) {

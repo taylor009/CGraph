@@ -106,6 +106,54 @@ DetectedLanguage detect_language(const std::filesystem::path& path) {
   return DetectedLanguage::Unknown;
 }
 
+std::string_view language_name(DetectedLanguage language) {
+  switch (language) {
+    case DetectedLanguage::Apex:
+      return "apex";
+    case DetectedLanguage::C:
+      return "c";
+    case DetectedLanguage::Cpp:
+      return "cpp";
+    case DetectedLanguage::CSharp:
+      return "csharp";
+    case DetectedLanguage::Delphi:
+      return "delphi";
+    case DetectedLanguage::Go:
+      return "go";
+    case DetectedLanguage::Groovy:
+      return "groovy";
+    case DetectedLanguage::Java:
+      return "java";
+    case DetectedLanguage::JavaScript:
+      return "javascript";
+    case DetectedLanguage::Kotlin:
+      return "kotlin";
+    case DetectedLanguage::McpConfig:
+      return "mcp-config";
+    case DetectedLanguage::MsBuild:
+      return "msbuild";
+    case DetectedLanguage::PhpBlade:
+      return "php-blade";
+    case DetectedLanguage::Python:
+      return "python";
+    case DetectedLanguage::Ruby:
+      return "ruby";
+    case DetectedLanguage::Scala:
+      return "scala";
+    case DetectedLanguage::Sql:
+      return "sql";
+    case DetectedLanguage::TypeScript:
+      return "typescript";
+    case DetectedLanguage::Tsx:
+      return "tsx";
+    case DetectedLanguage::Xml:
+      return "xml";
+    case DetectedLanguage::Unknown:
+      break;
+  }
+  return "unknown";
+}
+
 std::vector<DetectedFile> detect_project_files(const std::filesystem::path& root) {
   std::vector<DetectedFile> files;
   const auto canonical_root = std::filesystem::weakly_canonical(root);
