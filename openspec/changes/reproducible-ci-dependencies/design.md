@@ -16,6 +16,8 @@ GCC then enforces C++20 designated-initializer order in the daemon-lifecycle fix
 
 Keeping Clang scoped to CGraph exposes a compiler boundary in the updated igraph port. The port enables link-time optimization automatically, so vcpkg's native GCC emits compiler-specific LTO objects that the Clang fuzzer link cannot consume. OpenBLAS must retain the native compiler, so fuzzer dependencies need a Linux triplet that disables igraph LTO at package creation.
 
+On the current Windows runner, vcpkg's dynamic-library LAPACK provider builds LAPACK 3.12.1 with LLVM Flang 22.1.3, which cannot parse the generated module files. The same vcpkg graph already selects its C-only `clapack` provider when dependency libraries are static, avoiding a Fortran compiler while preserving the LAPACK package contract.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -70,11 +72,14 @@ Order the daemon-lifecycle fixture's `source_location` and `kind` designators ex
 
 Use a dedicated `x64-linux-clang` vcpkg triplet for the fuzzer job. The triplet preserves the built-in Linux architecture and linkage contract and appends `-DIGRAPH_ENABLE_LTO=OFF` to port configuration, after the igraph port's automatic setting. Export the triplet for `run-vcpkg` and pass it explicitly as CMake's `VCPKG_TARGET_TRIPLET` so dependency installation and consumption share one ABI directory. This keeps GCC for OpenBLAS, Clang for CGraph and libFuzzer, and ordinary object code at their static-library boundary.
 
+Use an `x64-windows-static-md` triplet for the Windows default job. Static dependency libraries trigger vcpkg's declared `clapack` provider while the dynamic CRT retains CGraph's normal MSVC runtime contract. Select the triplet through the existing matrix configure step; do not pin a Windows-only package version or change the runner.
+
 ## Risks / Trade-offs
 
 - **An upstream submodule becomes unavailable** → Pins remain immutable in the parent commit, and CI failure identifies the exact unavailable repository rather than compiling partial source.
 - **The newest vcpkg baseline introduces a different runner regression** → Advance only one manifest baseline and accept it only after the complete matrix passes; do not add per-runner exceptions.
 - **Native dependencies use compiler-specific LTO** → Disable igraph LTO only in the Linux Clang-consumer triplet; preserve the same versions, linkage, and native dependency compiler.
+- **The Windows runner's Fortran compiler rejects LAPACK sources** → Use static dependency linkage so vcpkg selects its supported C-only LAPACK provider, retaining the dynamic MSVC runtime.
 - **Recursive checkout costs additional network time** → The repository needs all eleven grammars to build the configured extractor set, so the cost reflects the actual source contract.
 - **Hosted runner images change later** → A manifest-pinned graph and complete matrix make drift visible; future repairs must again update the canonical baseline rather than add fallbacks.
 
