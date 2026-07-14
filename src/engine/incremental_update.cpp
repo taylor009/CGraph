@@ -1,6 +1,7 @@
 #include "cgraph/incremental_update.hpp"
 
 #include "cgraph/analysis.hpp"
+#include "cgraph/configured_extractors.hpp"
 #include "cgraph/detect.hpp"
 #include "cgraph/dedup.hpp"
 #include "cgraph/file_cache.hpp"
@@ -62,6 +63,28 @@ void finalize_graph(GraphSnapshot& graph) {
   analyze_graph(graph);
 }
 
+// Keeps state.unextracted current across incremental adds/removes of files
+// whose language has no registered extractor. Full rescans recompute the map
+// wholesale, so any drift here self-heals on the next rescan.
+void note_unextracted_change(DaemonState& state, const std::filesystem::path& path, bool added) {
+  const auto language = detect_language(path);
+  if (language == DetectedLanguage::Unknown || has_registered_extractor(language)) {
+    return;
+  }
+  const auto name = std::string(language_name(language));
+  if (added) {
+    ++state.unextracted[name];
+    return;
+  }
+  if (const auto entry = state.unextracted.find(name); entry != state.unextracted.end()) {
+    if (entry->second <= 1) {
+      state.unextracted.erase(entry);
+    } else {
+      --entry->second;
+    }
+  }
+}
+
 }  // namespace
 
 IncrementalUpdateResult full_stat_index_rescan(
@@ -73,6 +96,7 @@ IncrementalUpdateResult full_stat_index_rescan(
   result.full_rescan = true;
 
   auto detected_files = detect_project_files(root);
+  state.unextracted = unextracted_counts(detected_files);
   std::unordered_map<std::string, ExtractionResult> rescanned;
   std::unordered_map<std::string, FileCacheEntry> rescanned_cache;
   rescanned.reserve(detected_files.size());
@@ -174,6 +198,7 @@ IncrementalUpdateResult apply_incremental_code_updates(
       if (index.files.erase(key) > 0) {
         ++result.files_removed;
         changed_sources.push_back(key);
+        note_unextracted_change(state, event.path, /*added=*/false);
       }
       continue;
     }
@@ -192,6 +217,7 @@ IncrementalUpdateResult apply_incremental_code_updates(
       if (index.files.erase(key) > 0) {
         ++result.files_removed;
         changed_sources.push_back(key);
+        note_unextracted_change(state, event.path, /*added=*/false);
       }
       continue;
     }
@@ -211,6 +237,9 @@ IncrementalUpdateResult apply_incremental_code_updates(
 
     auto extraction = extract_detected_file(DetectedFile{.path = event.path, .language = language});
     result.warnings.insert(result.warnings.end(), extraction.fragment.warnings.begin(), extraction.fragment.warnings.end());
+    if (!index.files.contains(key)) {
+      note_unextracted_change(state, event.path, /*added=*/true);
+    }
     index.files[key] = std::move(extraction);
     ++result.files_reextracted;
     changed_sources.push_back(key);

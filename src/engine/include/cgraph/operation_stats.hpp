@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -55,6 +56,10 @@ struct BuildStats {
   std::size_t files_cache_hit = 0;  // reused from a warm index
   std::size_t nodes = 0;
   std::size_t edges = 0;
+  // Detected files no registered extractor handles, per language name. Empty
+  // when coverage is total; nonzero means part of the tree is invisible to the
+  // graph (fail-loud, so a coverage hole never hides in a per-file warning).
+  std::map<std::string, std::size_t> unextracted;
 
   [[nodiscard]] double total_ms() const {
     return extract_ms + merge_ms + resolve_ms + dedup_ms + communities_ms + analyze_ms;

@@ -436,10 +436,12 @@ std::filesystem::path current_executable_path(const char* argv0) {
     }
   }
 #elif defined(__linux__)
-  std::error_code ec;
-  auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
-  if (!ec) {
-    return p;
+  {
+    std::error_code ec;
+    auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (!ec) {
+      return p;
+    }
   }
 #endif
   std::error_code ec;

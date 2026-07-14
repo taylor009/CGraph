@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <iomanip>
+#include <memory>
 #include <numeric>
 #include <sstream>
 #include <string>
