@@ -67,6 +67,20 @@ int main() {
     std::cerr << "FAIL: could not load " << graph_path << "\n";
     return 1;
   }
+  auto portable_graph = *cgraph::read_graph_snapshot(state);
+  const fs::path repo_root = CGRAPH_REPO_ROOT;
+  for (auto& node : portable_graph.nodes) {
+    if (node.source_file.empty()) {
+      continue;
+    }
+    const fs::path source_file = node.source_file;
+    if (source_file.is_absolute()) {
+      std::cerr << "FAIL: parity fixture source paths must be repository-relative: " << source_file << "\n";
+      return 1;
+    }
+    node.source_file = (repo_root / source_file).lexically_normal().string();
+  }
+  cgraph::publish_graph_snapshot(state, std::move(portable_graph));
   const auto snapshot = cgraph::read_graph_snapshot(state);
 
   std::unordered_map<std::string, const cgraph::Node*> by_id;
