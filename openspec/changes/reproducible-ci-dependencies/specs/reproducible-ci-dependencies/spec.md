@@ -20,7 +20,7 @@ The repository SHALL select vcpkg port versions through the single `builtin-base
 
 #### Scenario: Fuzzer smoke job
 - **WHEN** GitHub Actions runs the declared fuzzer job
-- **THEN** dependency installation succeeds and the configured CGraph fuzz smoke tests build and pass
+- **THEN** dependency installation uses vcpkg's native toolchain, CGraph's fuzzer preset selects Clang, and the configured fuzz smoke tests build and pass
 
 ### Requirement: Dependency metadata is internally consistent
 The repository SHALL keep submodule paths, upstream URLs, parent-index commits, and the documented tree-sitter pins consistent.

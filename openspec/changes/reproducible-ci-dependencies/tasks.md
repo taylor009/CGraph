@@ -8,6 +8,8 @@
 
 - [x] 2.1 Advance the sole `vcpkg.json` `builtin-baseline` with `vcpkg x-update-baseline`; do not add workflow or platform-specific version overrides.
 - [x] 2.2 Materialize the updated manifest dependency graph and verify CMake configuration succeeds against it.
+- [x] 2.3 Scope Clang selection to the CGraph fuzzer preset, leaving vcpkg dependency compiler selection unmodified, and verify the preset still selects a libFuzzer-capable Clang toolchain.
+- [x] 2.4 Add the direct `<memory>` dependency required by `analysis.cpp` and verify the updated igraph graph compiles without transitive-header assumptions.
 
 ## 3. End-to-End Verification
 

@@ -6,6 +6,10 @@ The vcpkg manifest already provides a single `builtin-baseline`. The current bas
 
 Once dependency repair allows tests to execute, the committed retrieval fixture exposes a latent portability defect: its `source_file` fields contain one developer's absolute checkout path. Because context packing prices on-disk source slices, missing CI snippets change the measured selection result. The fixture must store repository-relative paths and the test must resolve them through its compile-time repository root before invoking production packing code.
 
+The fuzzer job also exports `CC=clang` and `CXX=clang++` for the entire process. Manifest installation inherits those variables, so vcpkg builds OpenBLAS Debug AVX-512 assembly with Clang and fails before CGraph configures. Only CGraph's fuzzer targets require Clang; the dependency graph does not.
+
+The updated igraph package no longer makes `<memory>` available transitively to `analysis.cpp`. That translation unit owns igraph objects through `std::unique_ptr`, so it must include the standard header it directly consumes.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -45,6 +49,14 @@ This metadata change has no useful isolated unit-test seam. Its direct test is a
 ### Keep committed retrieval inputs checkout-portable
 
 Store fixture `source_file` values relative to the repository and reject absolute paths in the parity executable. Rebase each path through the existing `CGRAPH_REPO_ROOT` test definition before publishing the snapshot to the production request path. This retains real source-slice accounting without embedding a host path or adding runtime fallback behavior.
+
+### Scope the fuzzer compiler to CGraph
+
+Select `clang` and `clang++` with `CMAKE_C_COMPILER` and `CMAKE_CXX_COMPILER` in the fuzzer configure preset instead of exporting job-wide compiler variables. CGraph still configures and builds its libFuzzer targets with Clang, while vcpkg resolves its native dependency compiler independently. This keeps one manifest graph and avoids a compiler override or port fallback for OpenBLAS.
+
+### Declare direct standard-library dependencies
+
+Include `<memory>` in `analysis.cpp`, where `std::unique_ptr` is used. The previous successful builds depended on an implementation detail of older igraph headers; making the dependency explicit keeps runtime behavior unchanged and lets the single updated manifest graph compile consistently.
 
 ## Risks / Trade-offs
 
