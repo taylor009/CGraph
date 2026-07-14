@@ -3,6 +3,7 @@
 #include "cgraph/daemon_endpoint.hpp"
 #include "cgraph/daemon_identity.hpp"
 #include "cgraph/daemon_lifecycle.hpp"
+#include "cgraph/configured_extractors.hpp"
 #include "cgraph/daemon_ops.hpp"
 #include "cgraph/incremental_update.hpp"
 #include "cgraph/index_persistence.hpp"
@@ -514,6 +515,9 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     if (!load_graph_snapshot(state, graph_path)) {
       return false;
     }
+    // The fast path skips the rescan that normally populates the coverage map;
+    // compute it from the detection walk this path already did.
+    state.unextracted = unextracted_counts(detected);
     ingest_all_drops();
     ingest_all_memory();  // checkpoints re-overlaid from sidecars; graph.json holds none
     // Log the fast-path load immediately — before enrichment planning, which
