@@ -40,6 +40,9 @@ jobs:
   fuzz-smoke:
     name: ubuntu-latest / fuzzers
     runs-on: ubuntu-latest
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-linux-clang
+      VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/triplets
 
     steps:
       - uses: actions/checkout@v4
