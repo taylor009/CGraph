@@ -89,6 +89,21 @@ int main() {
   expect(ok, orphan.to_add.empty() && orphan.to_remove.size() == 1 && orphan.to_remove.front() == "deadbeef",
          "reconcile schedules an orphaned installed hash for removal");
 
+  // --- Drainer residency decision: pure, launchctl-free. Installation stays
+  // explicit; reconcile only re-bootstraps an installed-but-unloaded drainer. ---
+  expect(ok, cgraph::decide_drainer_residency(/*plist_exists=*/true, /*service_loaded=*/false) ==
+                 cgraph::DrainerResidencyAction::kRebootstrap,
+         "installed drainer whose service is unloaded is re-bootstrapped");
+  expect(ok, cgraph::decide_drainer_residency(/*plist_exists=*/true, /*service_loaded=*/true) ==
+                 cgraph::DrainerResidencyAction::kNone,
+         "installed and already-loaded drainer is left untouched");
+  expect(ok, cgraph::decide_drainer_residency(/*plist_exists=*/false, /*service_loaded=*/false) ==
+                 cgraph::DrainerResidencyAction::kNone,
+         "absent drainer plist is never installed by reconcile");
+  expect(ok, cgraph::decide_drainer_residency(/*plist_exists=*/false, /*service_loaded=*/true) ==
+                 cgraph::DrainerResidencyAction::kNone,
+         "no plist means reconcile takes no residency action");
+
   // --- Plist rendering: per-repo daemon and supervisor. ---
   cgraph::LaunchAgentSpec repo_spec;
   repo_spec.label = cgraph::per_repo_agent_label("abc123");

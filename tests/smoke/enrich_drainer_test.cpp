@@ -30,7 +30,7 @@ bool contains(const std::string& haystack, const std::string& needle) {
 
 // Exercises the drainer's portable surface against a real temp tree: script
 // resolution walks up to integrations/always-on, the spec renders the expected
-// launchd keys (/bin/sh + absolute binaries + chunk cap, RunAtLoad, daily
+// launchd keys (/bin/sh + absolute binaries + chunk cap, RunAtLoad, 4-hour
 // StartInterval, no KeepAlive), and the plist write/installed/remove layer round
 // trips. Real launchctl bootstrap/bootout is the OS seam proven manually.
 int main() {
@@ -70,8 +70,8 @@ int main() {
                  spec.program_args[4] == "7",
          "spec runs /bin/sh <script> <cgraph> <client> <chunk-cap>");
   expect(ok, !spec.keep_alive && spec.run_at_load, "one-shot sweep at load, no KeepAlive");
-  expect(ok, spec.start_interval.has_value() && *spec.start_interval == 86400,
-         "default cadence is daily");
+  expect(ok, spec.start_interval.has_value() && *spec.start_interval == 14400,
+         "default cadence is every 4 hours (drains a few-hundred-chunk backlog within days)");
 
   const auto plist = cgraph::render_launch_agent(spec);
   expect(ok, contains(plist, "com.cgraph.enrich-drain"), "plist names the label");

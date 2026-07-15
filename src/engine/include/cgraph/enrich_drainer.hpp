@@ -16,7 +16,8 @@ struct DrainerConfig {
   std::filesystem::path cgraph_binary;      // absolute; script lists tracked repos with it
   std::filesystem::path client_binary;      // absolute; script reads status with it
   std::filesystem::path launch_agents_dir;  // default: ~/Library/LaunchAgents
-  int interval_seconds = 86400;             // daily
+  int interval_seconds = 14400;             // every 4 hours: drains a few-hundred-chunk
+                                            // backlog (10 chunks/repo/run) within days, not weeks
   int chunk_cap = 10;                       // max chunks a single run may author, per repo
   // Host coding-agent CLI resolved at install time (absolute path), baked into
   // the agent's environment as CGRAPH_HOST_CLI. Install runs in the user's
