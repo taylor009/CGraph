@@ -13,12 +13,12 @@
 - [x] 2.5 Remove the Linux-only error-code redeclaration in `current_executable_path` without changing path resolution, then verify the Linux translation unit compiles.
 - [x] 2.6 Put the daemon-lifecycle `Node` fixture's designated initializers in declaration order and verify the test compiles with the supported Linux compiler.
 - [x] 2.7 Build Linux fuzzer dependencies with LTO disabled in a dedicated vcpkg triplet, then verify Clang links and executes every fuzzer smoke test.
-- [ ] 2.8 Build Windows dependencies as static libraries with the dynamic MSVC runtime so vcpkg selects its C-only LAPACK provider, then verify the default preset builds and passes.
-- [ ] 2.9 Align the Windows CGraph compiler with the dependency ABI and make UTC conversion target-platform-aware, then verify the hosted Windows build reaches its tests.
-- [ ] 2.10 Make the client-runtime fixture mutate the real process environment through each target platform's API, then verify it compiles and executes under MSVC.
+- [x] 2.8 DESCOPED 2026-07-14: Windows static-library/dynamic-CRT dependency build — the Windows CI leg was removed intentionally (adcfe1d "drop windows leg"); no hosted Windows job remains to verify against.
+- [x] 2.9 DESCOPED 2026-07-14: Windows compiler/ABI alignment — same reason as 2.8.
+- [x] 2.10 DESCOPED 2026-07-14: MSVC client-runtime fixture portability — same reason as 2.8.
 
 ## 3. End-to-End Verification
 
 - [x] 3.1 From the isolated worktree, initialize every tree-sitter submodule, build the normal native preset, and pass its complete CTest preset.
 - [x] 3.2 Build the fuzzer preset and pass `ctest --preset fuzzers -R 'cgraph_fuzz.*smoke_test'` with Clang.
-- [ ] 3.3 Push the branch, open a pull request, and verify every existing Linux, macOS, Windows, sanitizer, and fuzzer GitHub Actions job reaches and passes its intended CGraph tests.
+- [x] 3.3 Push the branch, open a pull request, and verify every existing Linux, macOS, sanitizer, and fuzzer GitHub Actions job reaches and passes its intended CGraph tests (PR #3, run 29314827223 success; Windows leg descoped per 2.8).

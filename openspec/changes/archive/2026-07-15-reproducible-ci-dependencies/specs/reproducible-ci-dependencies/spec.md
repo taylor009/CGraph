@@ -12,7 +12,7 @@ The repository SHALL declare every tree-sitter gitlink consumed by the native bu
 - **THEN** it materializes the same complete tree-sitter dependency set before CMake configuration
 
 ### Requirement: CI uses one manifest-pinned native dependency graph
-The repository SHALL select vcpkg port versions through the single `builtin-baseline` in `vcpkg.json`, and the existing Linux, macOS, and Windows jobs MUST install that graph without platform-specific version overrides or fallback implementations.
+The repository SHALL select vcpkg port versions through the single `builtin-baseline` in `vcpkg.json`, and the existing Linux and macOS jobs MUST install that graph without platform-specific version overrides or fallback implementations.
 
 #### Scenario: Supported build matrix
 - **WHEN** GitHub Actions runs every declared operating-system and preset combination

@@ -1,9 +1,9 @@
 ## ADDED Requirements
 
 ### Requirement: Go source files are extracted through the configured tree-sitter path
-Project file detection already maps `.go` to `DetectedLanguage::Go`; the deterministic extractor
-SHALL handle it via a declarative `LanguageConfig` over the shared walker (no bespoke extractor
-translation unit). For each Go file it SHALL emit: a file node; `type` nodes for named types
+The deterministic extractor SHALL handle `.go` files (which project file detection already maps
+to `DetectedLanguage::Go`) via a declarative `LanguageConfig` over the shared walker (no bespoke
+extractor translation unit). For each Go file it SHALL emit: a file node; `type` nodes for named types
 (`type_spec` and `type_alias` — structs, interfaces, aliases); `function` nodes for
 `function_declaration` and `method_declaration` (methods keep their bare name; the receiver is
 not resolved); module stub nodes + file-level `imports` edges for each `import_spec` quoted path

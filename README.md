@@ -9,8 +9,9 @@ The project is built around a simple split:
 
 - `cgraph` runs a one-shot scan and writes graph artifacts to disk.
 - `graphd` keeps a per-root graph available for local query workflows.
-- `cgraph-client` sends `query`, `path`, `explain`, `update`, `status`, and
-  `shutdown` operations to the daemon.
+- `cgraph-client` sends `query`, `path`, `explain`, `impact`, `context`,
+  `update`, `status`, `shutdown`, `remember`, and `recall` operations to the
+  daemon.
 - `cgraph-mcp` exposes graph operations through JSON-RPC/MCP-style requests.
 - Host integrations own model choice and semantic enrichment work; CGraph owns
   deterministic extraction, fragment validation, cache state, and local graph
@@ -38,7 +39,8 @@ run the binaries from the build tree (or symlink them onto your `PATH`). See
 - Disk exports for `graph.json`, `graph.html`, `graph.svg`, `obsidian.md`,
   `cypher.txt`, and `call-flow.html`.
 - Daemon and thin-client workflows for local graph search, shortest paths, node
-  explanation, status checks, updates, and shutdown.
+  explanation, impact analysis, context packing, session memory
+  (remember/recall), status checks, updates, and shutdown.
 - Semantic enrichment workflow based on chunk planning, host-written
   `chunk_NN.json` fragments, schema validation, and content-hash cache records.
 - Smoke tests and optional libFuzzer targets.

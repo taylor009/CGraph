@@ -22,7 +22,7 @@ read `$env{VCPKG_ROOT}`, which is **not** set in the environment — you must ex
 export VCPKG_ROOT="$PWD/.vcpkg"          # required; presets fail without it
 cmake --preset default                    # configure -> build/default (Ninja, Debug)
 cmake --build build/default               # build all targets
-ctest --preset default                    # run the 48 smoke tests (output-on-failure)
+ctest --preset default                    # run the smoke tests (output-on-failure)
 ctest --preset default -R cgraph_detect_test   # run a single test by name (regex)
 ```
 
@@ -58,7 +58,7 @@ treat it as load-bearing.
 **Daemon / client / IPC** (`graph-daemon-client` capability):
 - `daemon_identity.cpp` derives a per-project-root hash + endpoint name (one daemon per canonical project root).
 - `daemon_lifecycle.cpp` / `daemon_endpoint.cpp` handle spawn, listen, and connection.
-- `daemon_ops.cpp::handle_daemon_request` dispatches the eight ops (`query`/`path`/`explain`/`impact`/`context`/`update`/`status`/`shutdown`). Graph state is a `shared_ptr<const GraphSnapshot>` read under `snapshot_mutex`; mutations go through a **single-writer path** (`writer_mutex`, `publish_graph_snapshot`/`mutate_graph_snapshot`).
+- `daemon_ops.cpp::handle_daemon_request` dispatches the ten ops (`query`/`path`/`explain`/`impact`/`context`/`update`/`status`/`shutdown`/`remember`/`recall`). Graph state is a `shared_ptr<const GraphSnapshot>` read under `snapshot_mutex`; mutations go through a **single-writer path** (`writer_mutex`, `publish_graph_snapshot`/`mutate_graph_snapshot`).
 - `protocol.cpp` — length-prefixed JSON frames, `kProtocolVersion = 1`; version-checked on every message.
 - `client_runtime.cpp` — thin client with connect/spawn/backoff hooks (`ClientRuntimeHooks`); auto-spawns the daemon if absent.
 - `incremental_update.cpp` + `file_watcher.cpp` + `file_cache.cpp` — `update .` triggers a full stat-index rescan; the serve loop polls the (gitignore-aware) watcher on `code_poll_interval` and applies incremental updates, with a hydrating full rescan on the first edit after a fast-load restart and a full-dedup reconcile every 5th update. Incremental state re-persists via `persist_if_due` and on exit.
