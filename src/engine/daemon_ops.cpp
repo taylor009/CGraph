@@ -1331,6 +1331,28 @@ struct StructuralIntent {
 
   const std::chrono::duration<double> uptime = StatsClock::now() - state.start_time;
 
+  // Snapshot the enrichment counters and the unextracted map under the same lock
+  // the writers (enrichment refresh, drop ingest, rescan/incremental update) take,
+  // so a constantly-polled status never tears a counter or iterates the map while
+  // it is being mutated. Copy out, then build the payload off the local copies.
+  EnrichmentState enrichment_state_value = EnrichmentState::Idle;
+  std::size_t enrichment_pending = 0;
+  std::size_t enrichment_running = 0;
+  std::size_t enrichment_stale = 0;
+  std::size_t enrichment_failed = 0;
+  std::size_t enrichment_plans_run = 0;
+  std::map<std::string, std::size_t> unextracted;
+  {
+    const std::scoped_lock lock(state.enrichment_mutex);
+    enrichment_state_value = state.enrichment_state;
+    enrichment_pending = state.enrichment_pending;
+    enrichment_running = state.enrichment_running;
+    enrichment_stale = state.enrichment_stale;
+    enrichment_failed = state.enrichment_failed;
+    enrichment_plans_run = state.enrichment_plans_run;
+    unextracted = state.unextracted;
+  }
+
   nlohmann::json payload{
       {"pid", state.pid},
       {"uptime_seconds", uptime.count()},
@@ -1338,15 +1360,15 @@ struct StructuralIntent {
       {"edge_count", graph.edges.size()},
       {"build_state", build_state_label(graph.build_state)},
       {"cache_hit_rate", graph.cache_hit_rate},
-      {"enrichment_state", enrichment_state(state.enrichment_state)},
-      {"enrichment_pending", state.enrichment_pending},
-      {"enrichment_running", state.enrichment_running},
-      {"enrichment_stale", state.enrichment_stale},
-      {"enrichment_failed", state.enrichment_failed},
-      {"enrichment_plans_run", state.enrichment_plans_run},
+      {"enrichment_state", enrichment_state(enrichment_state_value)},
+      {"enrichment_pending", enrichment_pending},
+      {"enrichment_running", enrichment_running},
+      {"enrichment_stale", enrichment_stale},
+      {"enrichment_failed", enrichment_failed},
+      {"enrichment_plans_run", enrichment_plans_run},
       {"watching", state.watching},
       {"incremental_updates", state.incremental_updates},
-      {"unextracted", state.unextracted},
+      {"unextracted", unextracted},
       {"ops", op_stats_json(state.op_stats)},
   };
   // Modeled cache saving = files_reused x mean(per-file extract time) from the

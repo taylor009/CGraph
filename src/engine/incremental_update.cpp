@@ -72,6 +72,8 @@ void note_unextracted_change(DaemonState& state, const std::filesystem::path& pa
     return;
   }
   const auto name = std::string(language_name(language));
+  // enrichment_mutex guards `unextracted` against a concurrent `status` read.
+  const std::scoped_lock lock(state.enrichment_mutex);
   if (added) {
     ++state.unextracted[name];
     return;
@@ -96,7 +98,11 @@ IncrementalUpdateResult full_stat_index_rescan(
   result.full_rescan = true;
 
   auto detected_files = detect_project_files(root);
-  state.unextracted = unextracted_counts(detected_files);
+  {
+    // enrichment_mutex guards `unextracted` against a concurrent `status` read.
+    const std::scoped_lock lock(state.enrichment_mutex);
+    state.unextracted = unextracted_counts(detected_files);
+  }
   std::unordered_map<std::string, ExtractionResult> rescanned;
   std::unordered_map<std::string, FileCacheEntry> rescanned_cache;
   rescanned.reserve(detected_files.size());

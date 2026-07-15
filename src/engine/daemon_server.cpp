@@ -44,6 +44,27 @@ namespace {
 
 #ifndef _WIN32
 
+// Per-connection I/O timeout. The daemon serves each connection inline on its
+// single serve-loop thread, so a client that stalls mid-frame would otherwise
+// freeze queries, the watcher poll, persistence, and idle shutdown until it
+// disconnects. A few seconds is generous for the local one-shot request/response
+// the thin client makes; a slower peer is dropped and the serve loop continues.
+constexpr std::chrono::seconds kConnectionIoTimeout{5};
+
+// Applies SO_RCVTIMEO + SO_SNDTIMEO to an accepted connection so a blocking
+// read/write cannot hang the single serve thread indefinitely. Best-effort:
+// a failed setsockopt only means the fallback (no timeout) for that one socket,
+// which is logged; it never aborts serving.
+void apply_connection_timeout(int conn) {
+  timeval tv{};
+  tv.tv_sec = static_cast<time_t>(kConnectionIoTimeout.count());
+  tv.tv_usec = 0;
+  if (::setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0 ||
+      ::setsockopt(conn, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0) {
+    std::cerr << "graphd: setsockopt(timeout) failed: " << std::strerror(errno) << '\n';
+  }
+}
+
 // Fills a sockaddr_un for `path`. Returns false if the path is too long for the
 // platform's sun_path (a hard limit, ~104 bytes on macOS) — a clear failure
 // rather than a silently truncated, wrong endpoint.
@@ -101,6 +122,13 @@ namespace {
       (static_cast<std::uint32_t>(header[1]) << 8U) |
       (static_cast<std::uint32_t>(header[2]) << 16U) |
       (static_cast<std::uint32_t>(header[3]) << 24U);
+  // Validate the declared body length BEFORE allocating: a hostile 4-byte
+  // header (e.g. 0xFFFFFFFF) would otherwise force a ~4 GB allocation. Reject
+  // an oversized frame as a protocol error and read no body, so a single bad
+  // header cannot exhaust memory or wedge the single-threaded serve loop.
+  if (length > kMaxFrameBodyBytes) {
+    return std::nullopt;
+  }
   std::vector<std::uint8_t> frame(static_cast<std::size_t>(length) + 4);
   std::memcpy(frame.data(), header.data(), header.size());
   if (length > 0 && !read_exact(fd, frame.data() + 4, length)) {
@@ -247,6 +275,7 @@ int run_static_seam_server(const std::filesystem::path& root, DaemonServerOption
       break;
     }
     last_activity = FileWatcherClock::now();
+    apply_connection_timeout(conn);  // a stalled peer must not wedge the serve loop
     if (const auto request = read_frame(conn)) {
       const auto response = handle_daemon_request(state, *request);
       (void)write_frame(conn, response);
@@ -337,6 +366,10 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     {
       const std::scoped_lock lock(graph_mutex);
       stat_index = index_snapshot;  // publish the refreshed stat entries
+    }
+    {
+      // enrichment_mutex guards the counters read concurrently by `status`.
+      const std::scoped_lock lock(state.enrichment_mutex);
       ++state.enrichment_plans_run;
       state.enrichment_pending = pending;
       state.enrichment_stale = plan.stale_inputs;
@@ -367,6 +400,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
         (entry != sources.end() && !entry->second.empty()) ? entry->second.front() : drop.path;
     const auto result = ingest_semantic_fragment(state, cache, source, drop.path);
     if (!result.merged) {
+      const std::scoped_lock lock(state.enrichment_mutex);  // status reads enrichment_failed
       ++state.enrichment_failed;
       return false;
     }
@@ -517,7 +551,10 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     }
     // The fast path skips the rescan that normally populates the coverage map;
     // compute it from the detection walk this path already did.
-    state.unextracted = unextracted_counts(detected);
+    {
+      const std::scoped_lock enrichment_lock(state.enrichment_mutex);  // status reads unextracted
+      state.unextracted = unextracted_counts(detected);
+    }
     ingest_all_drops();
     ingest_all_memory();  // checkpoints re-overlaid from sidecars; graph.json holds none
     // Log the fast-path load immediately — before enrichment planning, which
@@ -708,6 +745,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
       break;
     }
     last_activity = FileWatcherClock::now();
+    apply_connection_timeout(conn);  // a stalled peer must not wedge the serve loop
     // The thin client uses one connection per request: read it, answer it, close.
     if (const auto request = read_frame(conn)) {
       const auto response = handle_daemon_request(state, *request);

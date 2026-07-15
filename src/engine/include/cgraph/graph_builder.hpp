@@ -11,6 +11,13 @@ namespace cgraph {
 [[nodiscard]] GraphSnapshot merge_fragments(std::span<const Fragment> fragments);
 void merge_fragment(GraphSnapshot& graph, const Fragment& fragment);
 
+// Canonical node identity used by merge: an explicit `id` if present, otherwise
+// a normalized hash of source_file:kind:label. Exposed (not changing merge
+// behavior) so a caller can compute exactly the ids merge will assign — e.g. the
+// semantic-ingest referential-integrity check, which must match how merge keys
+// nodes before deciding whether an edge endpoint exists.
+[[nodiscard]] std::string node_key(const Node& node);
+
 // Relinks import/module stub nodes (kind "import"/"module", carrying an
 // `import_path` property) onto the real project file and declared symbol they
 // refer to, then drops the now-redundant stubs. Imports to files outside the

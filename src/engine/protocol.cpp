@@ -8,7 +8,9 @@ namespace cgraph {
 
 std::vector<std::uint8_t> encode_frame(const nlohmann::json& payload) {
   const auto body = payload.dump();
-  if (body.size() > std::numeric_limits<std::uint32_t>::max()) {
+  // Reject at the source so send and receive share one ceiling: a body larger
+  // than the shared cap is never framed (the peer would reject it on read).
+  if (body.size() > kMaxFrameBodyBytes) {
     return {};
   }
 
