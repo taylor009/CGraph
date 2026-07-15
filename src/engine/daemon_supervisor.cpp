@@ -2,6 +2,7 @@
 
 #include "cgraph/daemon_endpoint.hpp"
 #include "cgraph/daemon_identity.hpp"
+#include "cgraph/enrich_drainer.hpp"
 #include "cgraph/launch_agent.hpp"
 
 #include <nlohmann/json.hpp>
@@ -148,6 +149,15 @@ std::vector<std::string> installed_managed_hashes(const std::filesystem::path& l
   return out;
 }
 
+DrainerResidencyAction decide_drainer_residency(bool plist_exists, bool service_loaded) {
+  // Installation stays explicit. Reconcile only restores residency of a drainer
+  // that was installed (plist present) but has since fallen out of the domain.
+  if (plist_exists && !service_loaded) {
+    return DrainerResidencyAction::kRebootstrap;
+  }
+  return DrainerResidencyAction::kNone;
+}
+
 SupervisorSyncResult supervisor_sync(const SupervisorConfig& config, bool apply) {
   const auto discovered = discover_tracked_repos(config);
   const auto installed = installed_managed_hashes(config.launch_agents_dir);
@@ -168,6 +178,22 @@ SupervisorSyncResult supervisor_sync(const SupervisorConfig& config, bool apply)
     (void)launchctl_bootout(label);  // best-effort stop; plist removal is what matters
     std::error_code error;
     std::filesystem::remove(config.launch_agents_dir / (label + ".plist"), error);
+  }
+
+  // Restore residency of an installed-but-unloaded enrichment drainer. The
+  // drainer is installed explicitly (`cgraph drain install`); nothing else
+  // reconciled it, so a booted-out or login-lost service stayed silently dormant.
+  const std::string drainer_label(kDrainerLabel);
+  const auto drainer_plist = config.launch_agents_dir / (drainer_label + ".plist");
+  std::error_code plist_ec;
+  const bool drainer_plist_exists = std::filesystem::is_regular_file(drainer_plist, plist_ec);
+  if (decide_drainer_residency(drainer_plist_exists, launchctl_is_loaded(drainer_label)) ==
+      DrainerResidencyAction::kRebootstrap) {
+    if (launchctl_bootstrap(drainer_plist)) {
+      result.drainer_rebootstrapped = true;
+    } else {
+      result.failed.push_back(drainer_label);
+    }
   }
   return result;
 }
