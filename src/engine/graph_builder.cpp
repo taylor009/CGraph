@@ -12,16 +12,20 @@
 #include <vector>
 
 namespace cgraph {
-namespace {
 
-constexpr std::string_view kCallRelation = "CALLS";
-
-[[nodiscard]] std::string node_key(const Node& node) {
+// External linkage (declared in graph_builder.hpp): callers outside merge need
+// the exact node identity merge assigns. Behavior is unchanged from the prior
+// internal helper.
+std::string node_key(const Node& node) {
   if (!node.id.empty()) {
     return node.id;
   }
   return make_id(node.source_file + ":" + node.kind + ":" + node.label);
 }
+
+namespace {
+
+constexpr std::string_view kCallRelation = "CALLS";
 
 [[nodiscard]] std::string edge_key(const Edge& edge) {
   return edge.source + "\n" + edge.relation + "\n" + edge.target;

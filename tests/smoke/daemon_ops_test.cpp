@@ -6,6 +6,7 @@
 #include "cgraph/protocol.hpp"
 #include "cgraph/semantic_fragment_validation.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -1084,6 +1085,62 @@ int main() {
         nomatch["result"].value("neighbor_count", 1U) != 0U) {
       return 85;
     }
+  }
+
+  // status() reads the enrichment counters and the `unextracted` map while the
+  // enrichment/update path writes them from another thread. Both sides now take
+  // state.enrichment_mutex, so status must return well-formed, in-range counters
+  // and never crash iterating the map mid-mutation. A single-run test cannot
+  // PROVE absence of a race, but this exercises the shared lock under real
+  // concurrency and is the case TSan flags if the synchronization regresses
+  // (run under the sanitizers preset).
+  {
+    cgraph::DaemonState s;
+    cgraph::publish_graph_snapshot(s, cgraph::GraphSnapshot{});
+
+    std::atomic<bool> stop{false};
+    std::thread writer([&] {
+      for (std::size_t iteration = 0; !stop.load(); ++iteration) {
+        // Mirror the real writers: counters + map, all under enrichment_mutex.
+        {
+          const std::scoped_lock lock(s.enrichment_mutex);
+          s.enrichment_pending = iteration % 7;
+          s.enrichment_stale = iteration % 3;
+          s.enrichment_failed = iteration % 2;
+          s.enrichment_plans_run = iteration;
+          if (iteration % 2 == 0) {
+            s.unextracted["toml"] = iteration % 5;
+          } else {
+            s.unextracted.erase("toml");
+          }
+        }
+        // The in-flight scope flips running/state under the same lock.
+        { const cgraph::EnrichmentRunningScope running(s, iteration % 4); }
+      }
+    });
+
+    for (int poll = 0; poll < 5000; ++poll) {
+      const auto status = cgraph::handle_daemon_request(s, cgraph::make_request("status"));
+      if (!status.value("ok", false)) {
+        stop.store(true);
+        writer.join();
+        return 86;
+      }
+      const auto& result = status["result"];
+      // Every counter must be a readable unsigned in its writer's range -- a torn
+      // read would surface as a wild value or a type error here.
+      if (!result["enrichment_pending"].is_number_unsigned() || result["enrichment_pending"].get<std::size_t>() > 6 ||
+          !result["enrichment_stale"].is_number_unsigned() || result["enrichment_stale"].get<std::size_t>() > 2 ||
+          !result["enrichment_failed"].is_number_unsigned() || result["enrichment_failed"].get<std::size_t>() > 1 ||
+          !result["enrichment_running"].is_number_unsigned() || result["enrichment_running"].get<std::size_t>() > 3 ||
+          !result["unextracted"].is_object()) {
+        stop.store(true);
+        writer.join();
+        return 87;
+      }
+    }
+    stop.store(true);
+    writer.join();
   }
 
   return 0;

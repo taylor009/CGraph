@@ -3,7 +3,10 @@
 #include "cgraph/daemon_server.hpp"
 #include "cgraph/protocol.hpp"
 
+#include <array>
 #include <chrono>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -11,7 +14,35 @@
 #include <optional>
 #include <thread>
 
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
 namespace {
+
+// Opens a raw connected client socket to `socket_path`, or -1. Lets the wire
+// hardening tests send hand-crafted (hostile) bytes the protocol codec would
+// never produce -- an oversized length header, a truncated frame -- straight at
+// the real daemon.
+int raw_connect(const std::filesystem::path& socket_path) {
+  const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return -1;
+  }
+  sockaddr_un addr{};
+  addr.sun_family = AF_UNIX;
+  const auto path = socket_path.string();
+  if (path.size() >= sizeof(addr.sun_path)) {
+    ::close(fd);
+    return -1;
+  }
+  std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
+  if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    ::close(fd);
+    return -1;
+  }
+  return fd;
+}
 
 void write_file(const std::filesystem::path& path, std::string contents) {
   std::filesystem::create_directories(path.parent_path());
@@ -221,6 +252,57 @@ int main() {
     }
   }
   expect(ok, persisted, "incremental state re-persisted to graph.json");
+
+  // Wire hardening 1 (DoS): a 4-byte header declaring a ~4 GB body must be
+  // rejected WITHOUT the daemon allocating that body, and the daemon must keep
+  // serving. read_frame bails on any length above kMaxFrameBodyBytes before it
+  // sizes the frame buffer; if it still allocated 0xFFFFFFFF bytes the process
+  // would OOM/crash here instead of the next status answering.
+  {
+    const int fd = raw_connect(socket_path);
+    expect(ok, fd >= 0, "raw connect for oversized-frame test");
+    if (fd >= 0) {
+      const std::array<std::uint8_t, 4> huge{0xFF, 0xFF, 0xFF, 0xFF};  // 0xFFFFFFFF body length
+      (void)::write(fd, huge.data(), huge.size());
+      ::close(fd);  // send no body: the daemon must not wait on ~4 GB it never allocates
+    }
+  }
+  const auto after_huge = request_with_retry(socket_path, cgraph::make_request("status"));
+  expect(ok, after_huge && (*after_huge)["ok"] == true,
+         "daemon survived an oversized-length frame and still answers status");
+
+  // Wire hardening 2 (hang): a client that sends a partial header and then goes
+  // silent must not wedge the single-threaded serve loop. SO_RCVTIMEO drops the
+  // stalled read after a few seconds; the proof is that a normal status on a
+  // fresh connection still round-trips (the loop was never permanently blocked).
+  {
+    const int fd = raw_connect(socket_path);
+    expect(ok, fd >= 0, "raw connect for stalled-reader test");
+    if (fd >= 0) {
+      const std::array<std::uint8_t, 2> partial{0x10, 0x00};  // 2 of 4 header bytes, then stall
+      (void)::write(fd, partial.data(), partial.size());
+      // Hold the socket open, sending nothing. The daemon serves inline on one
+      // thread, so while it is stuck in read_exact on the missing header bytes it
+      // cannot service another request -- until SO_RCVTIMEO (a few seconds) fires
+      // and it drops the stalled peer. A fresh status must therefore eventually
+      // succeed: the loop RECOVERS rather than wedging forever. Retry past the
+      // timeout window (well over the 5s SO_RCVTIMEO) to prove recovery.
+      std::optional<nlohmann::json> concurrent;
+      for (int attempt = 0; attempt < 400 && !concurrent; ++attempt) {  // ~8s budget > 5s timeout
+        concurrent = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("status"));
+        if (!concurrent || !(*concurrent).value("ok", false)) {
+          concurrent.reset();
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+      }
+      expect(ok, concurrent && (*concurrent)["ok"] == true,
+             "daemon recovers and answers status after a stalled mid-frame reader is timed out");
+      ::close(fd);
+    }
+  }
+  const auto after_stall = request_with_retry(socket_path, cgraph::make_request("status"));
+  expect(ok, after_stall && (*after_stall)["ok"] == true,
+         "daemon serve loop survived a stalled half-frame reader");
 
   // An unknown op is an error, not a crash; shutdown stops the loop cleanly.
   const auto bad = cgraph::request_over_unix_socket(socket_path, cgraph::make_request("nonsense"));

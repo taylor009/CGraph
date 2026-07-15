@@ -26,6 +26,15 @@ struct DaemonState {
   std::shared_ptr<const GraphSnapshot> graph_snapshot = std::make_shared<GraphSnapshot>();
   mutable std::mutex snapshot_mutex;
   mutable std::mutex writer_mutex;
+  // Guards the enrichment counters (enrichment_state / _pending / _running /
+  // _stale / _failed / _plans_run) and the `unextracted` map below. These are
+  // written by the enrichment-refresh worker, the drop-ingest path, and the
+  // rescan/incremental-update path, and read concurrently by `status` (polled
+  // constantly by the status-gated drainer). A dedicated mutex — separate from
+  // snapshot_mutex/writer_mutex, which cover the graph snapshot — is taken by
+  // every reader and writer so a status read never tears a counter or iterates
+  // the map mid-mutation.
+  mutable std::mutex enrichment_mutex;
   bool shutdown_requested = false;
   int pid = 0;
   // Set at construction (~daemon start); uptime is derived from it in status,
@@ -82,6 +91,7 @@ struct DaemonState {
 class EnrichmentRunningScope {
  public:
   EnrichmentRunningScope(DaemonState& state, std::size_t batch_size) : state_(state) {
+    const std::scoped_lock lock(state_.enrichment_mutex);
     state_.enrichment_running = batch_size;
     state_.enrichment_state = EnrichmentState::Running;
   }
@@ -90,6 +100,7 @@ class EnrichmentRunningScope {
   EnrichmentRunningScope(EnrichmentRunningScope&&) = delete;
   EnrichmentRunningScope& operator=(EnrichmentRunningScope&&) = delete;
   ~EnrichmentRunningScope() {
+    const std::scoped_lock lock(state_.enrichment_mutex);
     state_.enrichment_running = 0;
     // Drop out of Running into the steady state implied by the current counts;
     // a subsequent refresh refines pending/stale, but Running never lingers.

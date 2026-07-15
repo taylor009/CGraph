@@ -127,6 +127,27 @@ int main() {
     return 1;
   }
 
+  // Durability: a failed atomic rename must NOT destroy the existing
+  // last-known-good graph. Force rename() to fail by making the destination a
+  // non-empty directory (rename of the temp FILE over a directory fails on
+  // POSIX). persist must return false, leave that destination untouched (no
+  // "remove then retry" that could wipe the good graph), and clean up the temp
+  // file it wrote. Regression coverage for the old destructive fallback.
+  const auto blocked_path = root / "blocked-graph.json";
+  std::filesystem::create_directories(blocked_path);           // destination is a directory...
+  std::ofstream(blocked_path / "keep.txt") << "last known good";  // ...and non-empty
+  const auto temp_path = root / "blocked-graph.json.tmp";
+  if (cgraph::persist_graph_snapshot(state, blocked_path)) {
+    return 1;  // must fail: cannot atomically replace a non-empty directory
+  }
+  if (!std::filesystem::is_directory(blocked_path) ||
+      !std::filesystem::exists(blocked_path / "keep.txt")) {
+    return 1;  // the prior data must survive the failed persist untouched
+  }
+  if (std::filesystem::exists(temp_path)) {
+    return 1;  // the orphan temp must be cleaned up, not left behind
+  }
+
   std::filesystem::remove_all(root);
   return 0;
 }

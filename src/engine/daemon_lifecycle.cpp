@@ -76,15 +76,18 @@ bool persist_graph_snapshot(const DaemonState& state, const std::filesystem::pat
     output << to_node_link_json(snapshot).dump(2) << '\n';
   }
 
+  // Atomic replace only. rename() over an existing file is atomic on POSIX, so
+  // graph.json is never observed missing or half-written. On failure we must NOT
+  // delete the existing last-known-good graph.json to "make room" for a retry:
+  // if the retry also failed the daemon would be left with no graph at all. Leave
+  // the prior file untouched, remove the orphan temp, and surface the failure.
   std::filesystem::rename(temp_path, graph_path, error);
-  if (!error) {
-    return true;
+  if (error) {
+    std::error_code cleanup;
+    std::filesystem::remove(temp_path, cleanup);  // drop the orphan temp; keep the good file
+    return false;
   }
-
-  std::filesystem::remove(graph_path, error);
-  error.clear();
-  std::filesystem::rename(temp_path, graph_path, error);
-  return !error;
+  return true;
 }
 
 bool load_graph_snapshot(DaemonState& state, const std::filesystem::path& graph_path) {

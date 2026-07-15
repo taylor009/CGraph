@@ -87,6 +87,59 @@ int main() {
     return 1;
   }
 
+  // Referential integrity on the semantic path: a schema-valid fragment whose
+  // edge points at a node that exists in NEITHER the fragment nor the live graph
+  // must be rejected atomically -- no merge, graph unchanged, counted like any
+  // other validation failure. Without the check, merge_fragment would insert the
+  // dangling edge unconditionally (it never validates endpoints). The fragment
+  // below declares node "doc:orphan" and an edge to "concept:ghost" (undeclared,
+  // absent from the graph): the edge is the referential break.
+  const auto dangling_fragment = root / "graphify-out" / "semantic-drop" / "chunk_03.json";
+  write_file(
+      dangling_fragment,
+      R"({
+        "nodes": [
+          {"id": "doc:orphan", "label": "Orphan", "type": "document", "source_file": "docs/guide.md"}
+        ],
+        "edges": [
+          {"source": "doc:orphan", "target": "concept:ghost", "relation": "MENTIONS"}
+        ],
+        "hyperedges": []
+      })");
+  const auto nodes_before_dangling = graph->nodes.size();
+  const auto edges_before_dangling = graph->edges.size();
+  result = cgraph::ingest_semantic_fragment(state, cache, source, dangling_fragment);
+  graph = cgraph::read_graph_snapshot(state);
+  if (result.merged || result.cache_updated || result.errors.empty() ||
+      graph->nodes.size() != nodes_before_dangling || graph->edges.size() != edges_before_dangling ||
+      has_node_label(*graph, "Orphan")) {
+    return 1;  // dangling-edge fragment must not mutate the graph at all
+  }
+
+  // Control: the SAME fragment shape is accepted once its edge target is a node
+  // that already exists in the live graph. Here the edge points at "code:service"
+  // (present since setup), so referential integrity holds and it merges. This
+  // proves the check rejects only genuine dangling endpoints, not every cross-
+  // fragment edge into the existing graph.
+  const auto connected_fragment = root / "graphify-out" / "semantic-drop" / "chunk_04.json";
+  write_file(
+      connected_fragment,
+      R"({
+        "nodes": [
+          {"id": "doc:connected", "label": "Connected", "type": "document", "source_file": "docs/guide.md"}
+        ],
+        "edges": [
+          {"source": "doc:connected", "target": "code:service", "relation": "MENTIONS"}
+        ],
+        "hyperedges": []
+      })");
+  result = cgraph::ingest_semantic_fragment(state, cache, source, connected_fragment);
+  graph = cgraph::read_graph_snapshot(state);
+  if (!result.merged || !result.errors.empty() || !has_node_label(*graph, "Connected") ||
+      !has_edge(*graph, "doc:connected", "MENTIONS", "code:service")) {
+    return 1;  // an edge into an existing graph node must be accepted
+  }
+
   const auto cache_hit_plan = cgraph::plan_semantic_chunks(root, cache);
   if (!cache_hit_plan.chunks.empty() || cache_hit_plan.cache_hits != 1) {
     return 1;
