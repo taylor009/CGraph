@@ -163,4 +163,15 @@ bool launchctl_bootout(const std::string& label) {
 #endif
 }
 
+bool launchctl_is_loaded(const std::string& label) {
+#if defined(__APPLE__)
+  // `launchctl print gui/<uid>/<label>` exits 0 when the service is registered
+  // in the domain and non-zero (with "Could not find service") when it is not.
+  return run_command({"launchctl", "print", gui_domain() + "/" + label}) == 0;
+#else
+  (void)label;
+  return false;
+#endif
+}
+
 }  // namespace cgraph

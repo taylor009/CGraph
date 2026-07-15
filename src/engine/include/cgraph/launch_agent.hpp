@@ -51,4 +51,9 @@ struct LaunchAgentSpec {
 [[nodiscard]] bool launchctl_bootstrap(const std::filesystem::path& plist_path);
 [[nodiscard]] bool launchctl_bootout(const std::string& label);
 
+// True when `label` is currently registered in the user gui domain (probed via
+// `launchctl print gui/<uid>/<label>` exit status). False on non-macOS, or when
+// the service is not loaded ("Could not find service").
+[[nodiscard]] bool launchctl_is_loaded(const std::string& label);
+
 }  // namespace cgraph

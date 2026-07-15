@@ -567,6 +567,9 @@ int run_daemon_command(int argc, char** argv) {
     for (const auto& hash : result.plan.to_remove) {
       std::cout << "  - " << hash << '\n';
     }
+    if (result.drainer_rebootstrapped) {
+      std::cout << "  restored enrichment drainer residency (" << cgraph::kDrainerLabel << ")\n";
+    }
     for (const auto& label : result.failed) {
       std::cerr << "  FAILED: " << label << '\n';
     }

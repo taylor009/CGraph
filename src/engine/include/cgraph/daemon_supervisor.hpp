@@ -49,12 +49,26 @@ struct ReconcilePlan {
 [[nodiscard]] std::vector<std::string> installed_managed_hashes(
     const std::filesystem::path& launch_agents_dir);
 
+// What the reconcile pass should do about the enrichment drainer's residency.
+// Installation is explicit (`cgraph drain install`); reconcile only restores an
+// already-installed drainer whose service has fallen out of the launchd domain.
+enum class DrainerResidencyAction {
+  kNone,          // plist absent (never installed) -> reconcile leaves it alone
+  kRebootstrap,   // plist present but service not loaded -> re-bootstrap it
+};
+
+// Pure decision: given whether the drainer plist exists in launch_agents_dir and
+// whether its service is currently loaded in the launchd domain, decide the action.
+// Directly testable with no launchctl side effects.
+[[nodiscard]] DrainerResidencyAction decide_drainer_residency(bool plist_exists, bool service_loaded);
+
 // Reconcile the managed per-repo agents against discovery. When apply is true,
 // each to_add gets a plist written + bootstrapped and each to_remove gets booted
 // out + its plist removed. Returns the plan it acted on (for inspection/tests).
 struct SupervisorSyncResult {
   ReconcilePlan plan;
   std::vector<std::string> failed;  // labels that failed to bootstrap/bootout
+  bool drainer_rebootstrapped = false;  // reconcile restored an unloaded installed drainer
 };
 [[nodiscard]] SupervisorSyncResult supervisor_sync(const SupervisorConfig& config, bool apply);
 
