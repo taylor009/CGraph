@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
 #include <unordered_set>
 
 namespace cgraph {
@@ -101,12 +102,31 @@ namespace {
       continue;
     }
     state.kind = classify_watched_file(entry.path());
+    state.token = read_file_change_token(entry.path());
     files.emplace(key_for(entry.path()), state);
   }
   return files;
 }
 
 }  // namespace
+
+FileChangeToken read_file_change_token(const std::filesystem::path& path) {
+  struct stat sb {};
+  if (::stat(path.c_str(), &sb) != 0) {
+    return {};
+  }
+  FileChangeToken token;
+  token.device = static_cast<std::uint64_t>(sb.st_dev);
+  token.inode = static_cast<std::uint64_t>(sb.st_ino);
+#if defined(__APPLE__)
+  token.ctime_sec = static_cast<std::int64_t>(sb.st_ctimespec.tv_sec);
+  token.ctime_nsec = static_cast<long>(sb.st_ctimespec.tv_nsec);
+#else
+  token.ctime_sec = static_cast<std::int64_t>(sb.st_ctim.tv_sec);
+  token.ctime_nsec = static_cast<long>(sb.st_ctim.tv_nsec);
+#endif
+  return token;
+}
 
 FileWatcher::FileWatcher(std::filesystem::path root, FileWatcherOptions options)
     : root_(std::move(root)), options_(options) {}
@@ -128,7 +148,8 @@ std::vector<FileWatchEvent> FileWatcher::poll(FileWatcherClock::time_point now) 
       };
       continue;
     }
-    if (previous->second.size != state.size || previous->second.modified_at != state.modified_at) {
+    if (previous->second.size != state.size || previous->second.modified_at != state.modified_at ||
+        previous->second.token != state.token) {
       pending_[key] = PendingEvent{
           .event = FileWatchEvent{.path = std::filesystem::path(key), .change = FileWatchChange::Modified, .kind = state.kind},
           .first_seen = now,

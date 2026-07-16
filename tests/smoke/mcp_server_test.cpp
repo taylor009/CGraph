@@ -148,5 +148,112 @@ int main() {
     return 1;
   }
 
+  // 4.1: graph_update schema describes content-verified synchronization and advertises content_root.
+  bool update_doc_verified = false;
+  bool update_doc_content_root = false;
+  bool update_doc_work_counts = false;
+  for (const auto& tool : listed["result"]["tools"]) {
+    if (tool.value("name", std::string{}) == "graph_update") {
+      const auto desc = tool.value("description", std::string{});
+      update_doc_verified = desc.find("verified") != std::string::npos;
+      update_doc_content_root = desc.find("content_root") != std::string::npos;
+      update_doc_work_counts = desc.find("files_hashed") != std::string::npos &&
+                               desc.find("bytes_hashed") != std::string::npos;
+    }
+  }
+  if (!update_doc_verified || !update_doc_content_root || !update_doc_work_counts) {
+    return 1;
+  }
+
+  // 4.1: All five graph read tools advertise expected_content_root in their input schema.
+  const std::vector<std::string> read_tools = {
+      "graph_query", "graph_path", "graph_explain", "graph_impact", "graph_context"};
+  std::size_t read_tools_with_root = 0;
+  for (const auto& tool : listed["result"]["tools"]) {
+    const auto tname = tool.value("name", std::string{});
+    for (const auto& rt : read_tools) {
+      if (tname == rt) {
+        if (!tool["inputSchema"]["properties"].contains("expected_content_root")) {
+          return 1;
+        }
+        ++read_tools_with_root;
+      }
+    }
+  }
+  if (read_tools_with_root != read_tools.size()) {
+    return 1;
+  }
+
+  // 4.1: expected_content_root forwards verbatim to each daemon read op.
+  const auto q_with_root = cgraph::handle_mcp_request(
+      nlohmann::json{
+          {"jsonrpc", "2.0"},
+          {"id", 10},
+          {"method", "tools/call"},
+          {"params",
+           {{"name", "graph_query"},
+            {"arguments", {{"query", "Foo"}, {"expected_content_root", "abc123"}}}}}},
+      forwarder);
+  if (q_with_root.contains("error") || forwarded["op"] != "query" ||
+      forwarded["params"]["expected_content_root"] != "abc123") {
+    return 1;
+  }
+
+  const auto path_with_root = cgraph::handle_mcp_request(
+      nlohmann::json{
+          {"jsonrpc", "2.0"},
+          {"id", 11},
+          {"method", "tools/call"},
+          {"params",
+           {{"name", "graph_path"},
+            {"arguments", {{"source", "a"}, {"target", "b"}, {"expected_content_root", "abc123"}}}}}},
+      forwarder);
+  if (path_with_root.contains("error") || forwarded["op"] != "path" ||
+      forwarded["params"]["expected_content_root"] != "abc123") {
+    return 1;
+  }
+
+  const auto explain_with_root = cgraph::handle_mcp_request(
+      nlohmann::json{
+          {"jsonrpc", "2.0"},
+          {"id", 12},
+          {"method", "tools/call"},
+          {"params",
+           {{"name", "graph_explain"},
+            {"arguments", {{"id", "a"}, {"expected_content_root", "abc123"}}}}}},
+      forwarder);
+  if (explain_with_root.contains("error") || forwarded["op"] != "explain" ||
+      forwarded["params"]["expected_content_root"] != "abc123") {
+    return 1;
+  }
+
+  const auto impact_with_root = cgraph::handle_mcp_request(
+      nlohmann::json{
+          {"jsonrpc", "2.0"},
+          {"id", 13},
+          {"method", "tools/call"},
+          {"params",
+           {{"name", "graph_impact"},
+            {"arguments", {{"id", "a"}, {"expected_content_root", "abc123"}}}}}},
+      forwarder);
+  if (impact_with_root.contains("error") || forwarded["op"] != "impact" ||
+      forwarded["params"]["expected_content_root"] != "abc123") {
+    return 1;
+  }
+
+  const auto ctx_with_root = cgraph::handle_mcp_request(
+      nlohmann::json{
+          {"jsonrpc", "2.0"},
+          {"id", 14},
+          {"method", "tools/call"},
+          {"params",
+           {{"name", "graph_context"},
+            {"arguments", {{"id", "a"}, {"expected_content_root", "abc123"}}}}}},
+      forwarder);
+  if (ctx_with_root.contains("error") || forwarded["op"] != "context" ||
+      forwarded["params"]["expected_content_root"] != "abc123") {
+    return 1;
+  }
+
   return 0;
 }

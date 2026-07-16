@@ -7,6 +7,7 @@
 #include "cgraph/file_watcher.hpp"
 #include "cgraph/tsconfig_aliases.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <span>
 #include <string>
@@ -15,9 +16,14 @@
 
 namespace cgraph {
 
+[[nodiscard]] std::string incremental_file_key(const std::filesystem::path& path);
+
 struct IncrementalGraphIndex {
   std::unordered_map<std::string, ExtractionResult> files;
   std::unordered_map<std::string, FileCacheEntry> cache;
+  // Canonical project root used to bind cache-entry paths into one stable
+  // project-relative content identity across rescans and watcher updates.
+  std::filesystem::path project_root;
   std::size_t updates_since_full_dedup = 0;
   // tsconfig path aliases for the project root, loaded once on full rescan and
   // reused by every incremental rebuild so `@/...` imports keep resolving.
@@ -30,6 +36,8 @@ struct IncrementalDedupPolicy {
 };
 
 struct IncrementalUpdateResult {
+  std::size_t files_hashed = 0;
+  std::uintmax_t bytes_hashed = 0;
   std::size_t files_reextracted = 0;
   std::size_t files_cache_hit = 0;  // reused from the warm index (no re-parse)
   std::size_t files_removed = 0;

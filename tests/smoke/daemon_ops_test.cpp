@@ -45,6 +45,11 @@ int main() {
 
   cgraph::GraphSnapshot graph;
   graph.build_state = cgraph::BuildState::DeterministicReady;
+  graph.content_root = cgraph::ContentRoot{
+      .algorithm = "sha256-merkle-v1",
+      .sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      .leaf_count = 1,
+  };
   // "a" is the central hub (centrality 1.0, a god node); "AlphaLeaf" also matches
   // the "Alpha" query but is peripheral. Edges c -> a -> b form a chain so the
   // blast radius has two depths to walk.
@@ -68,6 +73,59 @@ int main() {
   if (!status["ok"].get<bool>() || status["result"]["node_count"] != 4 ||
       status["result"].value("build_state", std::string{}) != "ready") {
     return 1;
+  }
+
+  // Verified freshness: status and each graph read identify the immutable
+  // snapshot selected for the request. A caller can pin that identity and gets
+  // no graph data if a later snapshot does not match it.
+  if (!status["result"].contains("freshness")) {
+    return 200;
+  }
+  const auto& status_freshness = status["result"]["freshness"];
+  const auto content_root = status_freshness.value("content_root", std::string{});
+  if (!status_freshness.value("verified", false) ||
+      status_freshness.value("algorithm", std::string{}) != "sha256-merkle-v1" ||
+      content_root != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ||
+      status_freshness.value("leaf_count", 0U) != 1U) {
+    return 200;
+  }
+  const auto has_pinned_freshness = [&content_root](const nlohmann::json& response) {
+    if (!response.value("ok", false) || !response.contains("result")) {
+      return false;
+    }
+    const auto& freshness = response["result"]["freshness"];
+    return freshness.value("verified", false) &&
+           freshness.value("algorithm", std::string{}) == "sha256-merkle-v1" &&
+           freshness.value("content_root", std::string{}) == content_root && freshness.contains("leaf_count");
+  };
+
+  const auto pinned_query = cgraph::handle_daemon_request(
+      state, cgraph::make_request("query", {{"q", "pha"}, {"expected_content_root", content_root}}));
+  const auto pinned_path = cgraph::handle_daemon_request(
+      state, cgraph::make_request("path", {{"source", "a"}, {"target", "b"}, {"expected_content_root", content_root}}));
+  const auto pinned_explain = cgraph::handle_daemon_request(
+      state, cgraph::make_request("explain", {{"id", "a"}, {"expected_content_root", content_root}}));
+  const auto pinned_impact = cgraph::handle_daemon_request(
+      state, cgraph::make_request("impact", {{"id", "b"}, {"expected_content_root", content_root}}));
+  const auto pinned_context = cgraph::handle_daemon_request(
+      state, cgraph::make_request("context", {{"id", "a"}, {"budget", 5000}, {"expected_content_root", content_root}}));
+  if (!has_pinned_freshness(pinned_query) || !has_pinned_freshness(pinned_path) ||
+      !has_pinned_freshness(pinned_explain) || !has_pinned_freshness(pinned_impact) ||
+      !has_pinned_freshness(pinned_context)) {
+    return 201;
+  }
+
+  const auto stale_pin = cgraph::handle_daemon_request(
+      state, cgraph::make_request("query", {{"q", "pha"}, {"expected_content_root", "stale-content-root"}}));
+  if (stale_pin.value("ok", true) || stale_pin.contains("result")) {
+    return 202;
+  }
+
+  cgraph::DaemonState rootless_state;
+  const auto empty_pin = cgraph::handle_daemon_request(
+      rootless_state, cgraph::make_request("query", {{"q", "anything"}, {"expected_content_root", ""}}));
+  if (empty_pin.value("ok", true) || empty_pin.contains("result")) {
+    return 203;
   }
 
   // A bare symbol name resolves against the label's leading token, so an agent

@@ -68,6 +68,37 @@ constexpr std::size_t kMaxKnapsackCapacity = 50000;
   return nlohmann::json{{"ok", true}, {"result", std::move(result)}};
 }
 
+[[nodiscard]] bool is_root_pinnable_read(DaemonOp op) {
+  switch (op) {
+    case DaemonOp::Query:
+    case DaemonOp::Path:
+    case DaemonOp::Explain:
+    case DaemonOp::Impact:
+    case DaemonOp::Context:
+      return true;
+    case DaemonOp::Update:
+    case DaemonOp::Status:
+    case DaemonOp::Shutdown:
+    case DaemonOp::Remember:
+    case DaemonOp::Recall:
+    case DaemonOp::Count:
+      return false;
+  }
+  return false;
+}
+
+[[nodiscard]] bool root_pin_matches_snapshot(
+    DaemonOp op,
+    const nlohmann::json& params,
+    const GraphSnapshot& graph) {
+  if (!is_root_pinnable_read(op) || !params.contains("expected_content_root")) {
+    return true;
+  }
+  const auto& expected = params.at("expected_content_root");
+  return expected.is_string() && is_valid_content_root(graph.content_root) &&
+         expected.get_ref<const std::string&>() == graph.content_root.sha256;
+}
+
 // Degree centrality (normalized 0..1) computed by analyze_graph and stored on
 // the node; 0 when absent (e.g. a snapshot that has not been analyzed).
 [[nodiscard]] double node_centrality(const Node& node) {
@@ -1312,6 +1343,11 @@ struct StructuralIntent {
   return result;
 }
 
+[[nodiscard]] nlohmann::json decorate_freshness(nlohmann::json result, const GraphSnapshot& graph) {
+  result["freshness"] = freshness_metadata(graph);
+  return result;
+}
+
 [[nodiscard]] nlohmann::json status(const DaemonState& state, const GraphSnapshot& graph) {
   const auto enrichment_state = [](EnrichmentState value) {
     switch (value) {
@@ -1370,6 +1406,7 @@ struct StructuralIntent {
       {"incremental_updates", state.incremental_updates},
       {"unextracted", unextracted},
       {"ops", op_stats_json(state.op_stats)},
+      {"freshness", freshness_metadata(graph)},
   };
   // Modeled cache saving = files_reused x mean(per-file extract time) from the
   // most recent build's Layer A timings. Omitted (never fabricated) when there
@@ -1668,6 +1705,15 @@ constexpr std::size_t kMaxCheckpointBodyChars = 16384;
 
 }  // namespace
 
+nlohmann::json freshness_metadata(const GraphSnapshot& graph) {
+  return {
+      {"verified", is_valid_content_root(graph.content_root)},
+      {"algorithm", graph.content_root.algorithm},
+      {"content_root", graph.content_root.sha256},
+      {"leaf_count", graph.content_root.leaf_count},
+  };
+}
+
 std::shared_ptr<const GraphSnapshot> read_graph_snapshot(const DaemonState& state) {
   std::scoped_lock guard(state.snapshot_mutex);
   return state.graph_snapshot;
@@ -1701,6 +1747,9 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
   if (!known_op) {
     return error_response("unknown op: " + op);
   }
+  if (!root_pin_matches_snapshot(*known_op, params, *graph)) {
+    return error_response("expected_content_root does not match the selected graph snapshot");
+  }
 
   // Time the op at the dispatch boundary and record into op_stats. A query with
   // zero total matches is the "zero hit" signal that distinguishes useful work
@@ -1716,17 +1765,17 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
         auto result = query_graph(*graph, params);
         zero_hit = result.value("total", std::size_t{0}) == 0;
         query_route = result.value("route", std::string{});
-        response = ok_response(annotate_build_state(std::move(result), *graph));
+        response = ok_response(decorate_freshness(annotate_build_state(std::move(result), *graph), *graph));
         break;
       }
       case DaemonOp::Path:
-        response = ok_response(annotate_build_state(shortest_path(*graph, params), *graph));
+        response = ok_response(decorate_freshness(annotate_build_state(shortest_path(*graph, params), *graph), *graph));
         break;
       case DaemonOp::Explain:
-        response = ok_response(annotate_build_state(explain_node(*graph, params), *graph));
+        response = ok_response(decorate_freshness(annotate_build_state(explain_node(*graph, params), *graph), *graph));
         break;
       case DaemonOp::Impact:
-        response = ok_response(annotate_build_state(impact_radius(*graph, params), *graph));
+        response = ok_response(decorate_freshness(annotate_build_state(impact_radius(*graph, params), *graph), *graph));
         break;
       case DaemonOp::Context: {
         auto result = pack_context(*graph, params);
@@ -1734,7 +1783,7 @@ nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& r
         // matched nothing). A resolved focus is useful context even if a tight
         // budget left no neighbors room, so focal-only is NOT a zero hit.
         zero_hit = result.value("focus", nlohmann::json()).is_null();
-        response = ok_response(annotate_build_state(std::move(result), *graph));
+        response = ok_response(decorate_freshness(annotate_build_state(std::move(result), *graph), *graph));
         break;
       }
       case DaemonOp::Update:

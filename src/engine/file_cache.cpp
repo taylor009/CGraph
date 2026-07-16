@@ -1,9 +1,14 @@
 #include "cgraph/file_cache.hpp"
+#include "cgraph/content_root.hpp"
 
+#include <algorithm>
 #include <array>
 #include <fstream>
 #include <iomanip>
+#include <optional>
+#include <span>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 namespace cgraph {
@@ -24,7 +29,7 @@ constexpr std::array<std::uint32_t, 64> kSha256RoundConstants = {
   return (value >> bits) | (value << (32 - bits));
 }
 
-[[nodiscard]] std::string sha256_bytes(const std::vector<std::uint8_t>& bytes) {
+[[nodiscard]] std::array<std::uint8_t, 32> sha256_digest(const std::vector<std::uint8_t>& bytes) {
   std::vector<std::uint8_t> message = bytes;
   const auto bit_length = static_cast<std::uint64_t>(message.size()) * 8U;
   message.push_back(0x80U);
@@ -99,12 +104,56 @@ constexpr std::array<std::uint32_t, 64> kSha256RoundConstants = {
     hash[7] += h;
   }
 
+  std::array<std::uint8_t, 32> result{};
+  for (int i = 0; i < 8; ++i) {
+    result[static_cast<std::size_t>(i * 4)] = static_cast<std::uint8_t>((hash[static_cast<std::size_t>(i)] >> 24U) & 0xffU);
+    result[static_cast<std::size_t>(i * 4 + 1)] = static_cast<std::uint8_t>((hash[static_cast<std::size_t>(i)] >> 16U) & 0xffU);
+    result[static_cast<std::size_t>(i * 4 + 2)] = static_cast<std::uint8_t>((hash[static_cast<std::size_t>(i)] >> 8U) & 0xffU);
+    result[static_cast<std::size_t>(i * 4 + 3)] = static_cast<std::uint8_t>(hash[static_cast<std::size_t>(i)] & 0xffU);
+  }
+  return result;
+}
+
+[[nodiscard]] std::string digest_to_hex(const std::array<std::uint8_t, 32>& digest) {
   std::ostringstream output;
   output << std::hex << std::setfill('0');
-  for (const auto word : hash) {
-    output << std::setw(8) << word;
+  for (const auto byte : digest) {
+    output << std::setw(2) << static_cast<int>(byte);
   }
   return output.str();
+}
+
+[[nodiscard]] std::string sha256_bytes(const std::vector<std::uint8_t>& bytes) {
+  return digest_to_hex(sha256_digest(bytes));
+}
+
+[[nodiscard]] std::optional<std::array<std::uint8_t, 32>> hex_to_bytes32(const std::string& hex) {
+  if (hex.size() != 64) {
+    return std::nullopt;
+  }
+  std::array<std::uint8_t, 32> bytes{};
+  auto nibble = [](char c) -> std::optional<std::uint8_t> {
+    if (c >= '0' && c <= '9') return static_cast<std::uint8_t>(c - '0');
+    if (c >= 'a' && c <= 'f') return static_cast<std::uint8_t>(10 + c - 'a');
+    if (c >= 'A' && c <= 'F') return static_cast<std::uint8_t>(10 + c - 'A');
+    return std::nullopt;
+  };
+  for (std::size_t i = 0; i < bytes.size(); ++i) {
+    const auto high = nibble(hex[i * 2]);
+    const auto low = nibble(hex[i * 2 + 1]);
+    if (!high || !low) {
+      return std::nullopt;
+    }
+    bytes[i] = static_cast<std::uint8_t>((*high << 4U) | *low);
+  }
+  return bytes;
+}
+
+[[nodiscard]] bool is_project_relative_path(const std::filesystem::path& path) {
+  if (path.empty() || path.is_absolute()) {
+    return false;
+  }
+  return std::ranges::none_of(path, [](const auto& component) { return component == ".."; });
 }
 
 [[nodiscard]] bool same_stat(const FileCacheEntry& lhs, const FileCacheEntry& rhs) {
@@ -147,7 +196,8 @@ FileCacheEntry read_file_cache_entry(const std::filesystem::path& path) {
 
 FileCacheClassification classify_cached_file(
     const std::filesystem::path& path,
-    std::optional<FileCacheEntry> previous) {
+    std::optional<FileCacheEntry> previous,
+    CacheValidation mode) {
   if (!std::filesystem::exists(path)) {
     return FileCacheClassification{.state = CacheState::Deleted};
   }
@@ -164,7 +214,7 @@ FileCacheClassification classify_cached_file(
     return FileCacheClassification{.state = CacheState::Deleted};
   }
 
-  if (previous.has_value() && same_stat(current, *previous)) {
+  if (mode == CacheValidation::Metadata && previous.has_value() && same_stat(current, *previous)) {
     current.sha256 = previous->sha256;
     return FileCacheClassification{.state = CacheState::StatHit, .current = std::move(current)};
   }
@@ -177,6 +227,90 @@ FileCacheClassification classify_cached_file(
     return FileCacheClassification{.state = CacheState::HashHit, .hash_computed = true, .current = std::move(current)};
   }
   return FileCacheClassification{.state = CacheState::Stale, .hash_computed = true, .current = std::move(current)};
+}
+
+ContentRoot compute_content_root(
+    const std::filesystem::path& project_root,
+    std::span<const FileCacheEntry> entries) {
+  if (entries.empty()) {
+    const std::vector<std::uint8_t> empty_domain = {0x02};
+    return ContentRoot{
+        .algorithm = std::string{kContentRootAlgorithm},
+        .sha256 = digest_to_hex(sha256_digest(empty_domain)),
+        .leaf_count = 0,
+    };
+  }
+
+  struct LeafInput {
+    std::string relative_path;
+    std::string file_sha256;
+  };
+  std::vector<LeafInput> leaves;
+  leaves.reserve(entries.size());
+  for (const auto& entry : entries) {
+    const auto relative_path = entry.path.lexically_normal().lexically_relative(project_root.lexically_normal());
+    if (!is_project_relative_path(relative_path)) {
+      throw std::invalid_argument("content-root leaf is outside the project root");
+    }
+    leaves.push_back({
+        .relative_path = relative_path.generic_string(),
+        .file_sha256 = entry.sha256,
+    });
+  }
+  std::ranges::sort(leaves, [](const LeafInput& a, const LeafInput& b) {
+    return a.relative_path < b.relative_path;
+  });
+
+  using Digest = std::array<std::uint8_t, 32>;
+  std::vector<Digest> level;
+  level.reserve(leaves.size());
+  for (const auto& leaf : leaves) {
+    const auto file_hash = hex_to_bytes32(leaf.file_sha256);
+    if (!file_hash) {
+      throw std::invalid_argument("content-root leaf has an invalid SHA-256 digest");
+    }
+    const auto path_len = static_cast<std::uint32_t>(leaf.relative_path.size());
+
+    std::vector<std::uint8_t> preimage;
+    preimage.reserve(1 + 4 + leaf.relative_path.size() + 32);
+    preimage.push_back(0x00);
+    preimage.push_back(static_cast<std::uint8_t>((path_len >> 24U) & 0xffU));
+    preimage.push_back(static_cast<std::uint8_t>((path_len >> 16U) & 0xffU));
+    preimage.push_back(static_cast<std::uint8_t>((path_len >> 8U) & 0xffU));
+    preimage.push_back(static_cast<std::uint8_t>(path_len & 0xffU));
+    preimage.insert(preimage.end(), leaf.relative_path.begin(), leaf.relative_path.end());
+    preimage.insert(preimage.end(), file_hash->begin(), file_hash->end());
+
+    level.push_back(sha256_digest(preimage));
+  }
+
+  while (level.size() > 1) {
+    std::vector<Digest> next;
+    next.reserve((level.size() + 1) / 2);
+    for (std::size_t i = 0; i < level.size(); i += 2) {
+      if (i + 1 < level.size()) {
+        std::vector<std::uint8_t> preimage;
+        preimage.reserve(1 + 64);
+        preimage.push_back(0x01);
+        preimage.insert(preimage.end(), level[i].begin(), level[i].end());
+        preimage.insert(preimage.end(), level[i + 1].begin(), level[i + 1].end());
+        next.push_back(sha256_digest(preimage));
+      } else {
+        next.push_back(level[i]);
+      }
+    }
+    level = std::move(next);
+  }
+
+  return ContentRoot{
+      .algorithm = std::string{kContentRootAlgorithm},
+      .sha256 = digest_to_hex(level[0]),
+      .leaf_count = leaves.size(),
+  };
+}
+
+bool is_valid_content_root(const ContentRoot& root) {
+  return root.algorithm == kContentRootAlgorithm && hex_to_bytes32(root.sha256).has_value();
 }
 
 }  // namespace cgraph

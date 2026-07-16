@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cgraph/content_root.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -81,6 +83,7 @@ struct GraphSnapshot {
   std::vector<Hyperedge> hyperedges;
   BuildState build_state = BuildState::Empty;
   double cache_hit_rate = 0.0;
+  ContentRoot content_root;
 };
 
 }  // namespace cgraph

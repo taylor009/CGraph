@@ -114,6 +114,7 @@ class EnrichmentRunningScope {
 };
 
 [[nodiscard]] std::shared_ptr<const GraphSnapshot> read_graph_snapshot(const DaemonState& state);
+[[nodiscard]] nlohmann::json freshness_metadata(const GraphSnapshot& graph);
 void publish_graph_snapshot(DaemonState& state, GraphSnapshot graph);
 void mutate_graph_snapshot(DaemonState& state, const std::function<void(GraphSnapshot&)>& mutator);
 [[nodiscard]] nlohmann::json handle_daemon_request(DaemonState& state, const nlohmann::json& request);

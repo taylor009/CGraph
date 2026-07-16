@@ -1,4 +1,5 @@
 #include "cgraph/file_extraction.hpp"
+#include "cgraph/file_cache.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -17,6 +18,7 @@ void write_file(const std::filesystem::path& path, const char* contents) {
 // and labels in order, plus edge endpoints. Enough to prove a parallel result
 // is identical to the serial one for the same file.
 [[nodiscard]] bool same_fragment(const cgraph::ExtractionResult& lhs, const cgraph::ExtractionResult& rhs) {
+  if (lhs.source_sha256 != rhs.source_sha256) return false;
   if (lhs.fragment.nodes.size() != rhs.fragment.nodes.size()) return false;
   if (lhs.fragment.edges.size() != rhs.fragment.edges.size()) return false;
   if (lhs.fragment.warnings != rhs.fragment.warnings) return false;
@@ -38,13 +40,15 @@ int main() {
   const auto root = std::filesystem::temp_directory_path() / "cgraph_file_extraction_test";
   std::filesystem::remove_all(root);
   const auto source_path = root / "main.py";
-  write_file(source_path, "def main():\n    return helper()\n");
+  constexpr const char* source = "def main():\n    return helper()\n";
+  write_file(source_path, source);
 
   const auto result = cgraph::extract_detected_file(cgraph::DetectedFile{
       .path = source_path,
       .language = cgraph::DetectedLanguage::Python,
   });
-  if (result.fragment.nodes.empty() || !result.fragment.warnings.empty()) {
+  if (result.fragment.nodes.empty() || !result.fragment.warnings.empty() ||
+      result.source_sha256 != cgraph::sha256_hex(source)) {
     std::filesystem::remove_all(root);
     return 1;
   }
@@ -53,7 +57,7 @@ int main() {
       .path = root / "missing.py",
       .language = cgraph::DetectedLanguage::Python,
   });
-  if (!missing.fragment.nodes.empty() || missing.fragment.warnings.empty()) {
+  if (!missing.fragment.nodes.empty() || missing.fragment.warnings.empty() || !missing.source_sha256.empty()) {
     std::filesystem::remove_all(root);
     return 1;
   }

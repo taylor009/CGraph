@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cgraph/content_root.hpp"
 #include "cgraph/detect.hpp"
 #include "cgraph/file_cache.hpp"
 
@@ -13,12 +14,13 @@ namespace cgraph {
 
 // A version-stamped snapshot of the file set a persisted graph.json was built
 // from. On daemon restart, if the version key still matches the running binary
-// and every detected file is a stat/hash hit against this manifest (no files
-// added or removed), the graph can be served straight from disk without
-// re-extracting anything (the Tier-1 fast path).
+// and a full content verification reproduces every leaf and the aggregate root,
+// the graph can be served straight from disk without re-extracting anything
+// (the Tier-1 fast path).
 struct IndexManifest {
   std::string version_key;
   std::vector<FileCacheEntry> files;
+  ContentRoot content_root;
 };
 
 // Logic version of the persisted pipeline artifacts. A persisted cache is
@@ -36,10 +38,14 @@ struct IndexManifest {
 // usable cache", never a half-loaded manifest).
 [[nodiscard]] std::optional<IndexManifest> read_index_manifest(const std::filesystem::path& path);
 
-// True iff the detected file set is identical to the manifest's (same count, no
-// additions or removals) and every file is a StatHit or HashHit against its
-// manifest entry. Does NOT check the version key — the caller compares that
-// against index_version_key() first.
-[[nodiscard]] bool tree_matches_manifest(const IndexManifest& manifest, std::span<const DetectedFile> detected);
+// True iff a content-verified read of the complete detected file set matches
+// every manifest leaf and recomputes the persisted root. Does NOT check the
+// version key — the caller compares that against index_version_key() first.
+// An empty project_root fails closed because a project-relative root cannot be
+// verified without it.
+[[nodiscard]] bool tree_matches_manifest(
+    const IndexManifest& manifest,
+    std::span<const DetectedFile> detected,
+    const std::filesystem::path& project_root);
 
 }  // namespace cgraph

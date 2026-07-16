@@ -16,6 +16,11 @@ enum class CacheState {
   Deleted,
 };
 
+enum class CacheValidation {
+  Metadata,
+  Content,
+};
+
 struct FileCacheEntry {
   std::filesystem::path path;
   std::uintmax_t size = 0;
@@ -34,6 +39,7 @@ struct FileCacheClassification {
 [[nodiscard]] FileCacheEntry read_file_cache_entry(const std::filesystem::path& path);
 [[nodiscard]] FileCacheClassification classify_cached_file(
     const std::filesystem::path& path,
-    std::optional<FileCacheEntry> previous);
+    std::optional<FileCacheEntry> previous,
+    CacheValidation mode = CacheValidation::Metadata);
 
 }  // namespace cgraph

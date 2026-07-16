@@ -2,6 +2,7 @@
 
 #include "cgraph/analysis.hpp"
 #include "cgraph/configured_extractors.hpp"
+#include "cgraph/content_root.hpp"
 #include "cgraph/detect.hpp"
 #include "cgraph/dedup.hpp"
 #include "cgraph/file_cache.hpp"
@@ -17,11 +18,12 @@
 #include <vector>
 
 namespace cgraph {
-namespace {
 
-[[nodiscard]] std::string key_for(const std::filesystem::path& path) {
+std::string incremental_file_key(const std::filesystem::path& path) {
   return path.lexically_normal().generic_string();
 }
+
+namespace {
 
 [[nodiscard]] GraphSnapshot rebuild_graph(const IncrementalGraphIndex& index) {
   std::vector<Fragment> fragments;
@@ -48,6 +50,15 @@ namespace {
   resolve_raw_calls(graph, raw_calls);
   resolve_raw_relations(graph, raw_relations);
   return graph;
+}
+
+[[nodiscard]] ContentRoot content_root_for(const IncrementalGraphIndex& index) {
+  std::vector<FileCacheEntry> entries;
+  entries.reserve(index.cache.size());
+  for (const auto& [_, entry] : index.cache) {
+    entries.push_back(entry);
+  }
+  return compute_content_root(index.project_root, entries);
 }
 
 // Community + centrality analysis, run AFTER dedup — exactly the order
@@ -96,6 +107,7 @@ IncrementalUpdateResult full_stat_index_rescan(
     const IncrementalDedupPolicy& dedup_policy) {
   IncrementalUpdateResult result;
   result.full_rescan = true;
+  index.project_root = std::filesystem::weakly_canonical(root);
 
   auto detected_files = detect_project_files(root);
   {
@@ -108,31 +120,35 @@ IncrementalUpdateResult full_stat_index_rescan(
   rescanned.reserve(detected_files.size());
   rescanned_cache.reserve(detected_files.size());
 
-  // Classify every detected file against the existing index: a stat/hash hit
-  // whose extraction we already hold is reused as-is; only changed and new files
-  // are re-extracted. With an empty index (cold start) everything is "new" and we
-  // extract all; with a warm or disk-loaded index we re-extract only the delta.
-  // A reused fragment is byte-identical to re-extracting it, so the merged graph
-  // is unchanged either way.
+  // Content-verify every detected file against the existing index. A freshly
+  // computed hash hit whose extraction we already hold is reused as-is; only
+  // changed and new files are re-extracted. With an empty index (cold start)
+  // everything is "new" and we extract all; with a warm index we re-extract only
+  // the delta. A reused fragment is byte-identical to re-extracting it, so the
+  // merged graph is unchanged either way.
   std::vector<DetectedFile> to_extract;
   for (const auto& file : detected_files) {
-    const auto key = key_for(file.path);
+    const auto key = incremental_file_key(file.path);
     std::optional<FileCacheEntry> previous;
     if (const auto cached = index.cache.find(key); cached != index.cache.end()) {
       previous = cached->second;
     }
-    const auto classification = classify_cached_file(file.path, std::move(previous));
+    const auto classification =
+        classify_cached_file(file.path, std::move(previous), CacheValidation::Content);
     if (classification.state == CacheState::Deleted || !classification.current.has_value()) {
       continue;  // vanished between detect and classify; treat as removed
     }
-    const bool reusable = (classification.state == CacheState::StatHit || classification.state == CacheState::HashHit);
-    if (reusable) {
-      if (const auto existing = index.files.find(key); existing != index.files.end()) {
-        rescanned.emplace(key, std::move(existing->second));
-        rescanned_cache.emplace(key, *classification.current);
-        ++result.files_cache_hit;
-        continue;
-      }
+    if (classification.hash_computed) {
+      ++result.files_hashed;
+      result.bytes_hashed += classification.current->size;
+    }
+    if (const auto existing = index.files.find(key);
+        existing != index.files.end() && !existing->second.source_sha256.empty() &&
+        existing->second.source_sha256 == classification.current->sha256) {
+      rescanned.emplace(key, std::move(existing->second));
+      rescanned_cache.emplace(key, *classification.current);
+      ++result.files_cache_hit;
+      continue;
     }
     rescanned_cache.emplace(key, *classification.current);
     to_extract.push_back(file);
@@ -148,7 +164,14 @@ IncrementalUpdateResult full_stat_index_rescan(
     for (std::size_t i = 0; i < to_extract.size(); ++i) {
       auto& extraction = extractions[i];
       result.warnings.insert(result.warnings.end(), extraction.fragment.warnings.begin(), extraction.fragment.warnings.end());
-      rescanned.emplace(key_for(to_extract[i].path), std::move(extraction));
+      const auto key = incremental_file_key(to_extract[i].path);
+      if (!extraction.source_sha256.empty()) {
+        // The extractor opened the file independently of cache classification.
+        // Publish the hash of the exact parsed source buffer so a concurrent
+        // rewrite between those reads cannot separate the graph from its leaf.
+        rescanned_cache.at(key).sha256 = extraction.source_sha256;
+      }
+      rescanned.emplace(key, std::move(extraction));
       ++result.files_reextracted;
     }
   }
@@ -170,6 +193,7 @@ IncrementalUpdateResult full_stat_index_rescan(
   semantic_dedup(graph, dedup_policy.options);
   finalize_graph(graph);  // communities + centrality on the deduped graph
   graph.cache_hit_rate = cache_hit_rate(result.files_cache_hit, files_total);
+  graph.content_root = content_root_for(index);
   result.full_dedup_reconciled = true;
 
   // Record this build's Layer A inputs for the modeled cache-saving estimate.
@@ -198,7 +222,7 @@ IncrementalUpdateResult apply_incremental_code_updates(
       continue;
     }
 
-    const auto key = key_for(event.path);
+    const auto key = incremental_file_key(event.path);
     if (event.change == FileWatchChange::Deleted) {
       index.cache.erase(key);
       if (index.files.erase(key) > 0) {
@@ -232,12 +256,20 @@ IncrementalUpdateResult apply_incremental_code_updates(
     if (const auto cached = index.cache.find(key); cached != index.cache.end()) {
       previous_cache = cached->second;
     }
-    auto cache_classification = classify_cached_file(event.path, std::move(previous_cache));
+    auto cache_classification =
+        classify_cached_file(event.path, std::move(previous_cache), CacheValidation::Content);
+    if (cache_classification.hash_computed && cache_classification.current.has_value()) {
+      ++result.files_hashed;
+      result.bytes_hashed += cache_classification.current->size;
+    }
     if (cache_classification.current.has_value()) {
       index.cache[key] = *cache_classification.current;
     }
-    if (index.files.contains(key) &&
-        (cache_classification.state == CacheState::StatHit || cache_classification.state == CacheState::HashHit)) {
+    if (const auto existing = index.files.find(key);
+        existing != index.files.end() && cache_classification.current.has_value() &&
+        !existing->second.source_sha256.empty() &&
+        existing->second.source_sha256 == cache_classification.current->sha256) {
+      ++result.files_cache_hit;
       continue;
     }
 
@@ -245,6 +277,18 @@ IncrementalUpdateResult apply_incremental_code_updates(
     result.warnings.insert(result.warnings.end(), extraction.fragment.warnings.begin(), extraction.fragment.warnings.end());
     if (!index.files.contains(key)) {
       note_unextracted_change(state, event.path, /*added=*/true);
+    }
+    if (!extraction.source_sha256.empty()) {
+      if (const auto cached = index.cache.find(key); cached != index.cache.end()) {
+        cached->second.sha256 = extraction.source_sha256;
+      } else {
+        // The file can vanish during classification and reappear before
+        // extraction. Keep the exact parsed hash even when no classified entry
+        // survived; metadata is advisory and the next content check refreshes it.
+        index.cache.emplace(
+            key,
+            FileCacheEntry{.path = event.path, .sha256 = extraction.source_sha256});
+      }
     }
     index.files[key] = std::move(extraction);
     ++result.files_reextracted;
@@ -263,6 +307,7 @@ IncrementalUpdateResult apply_incremental_code_updates(
     index.updates_since_full_dedup = 0;
   }
   finalize_graph(graph);  // communities + centrality after dedup (matches run_one_shot order)
+  graph.content_root = content_root_for(index);
   publish_graph_snapshot(state, std::move(graph));
   return result;
 }

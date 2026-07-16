@@ -120,6 +120,50 @@ int main() {
     return 1;
   }
 
+  // === POSIX file change token: same-size rewrite with restored mtime ===
+
+  const auto token_root = std::filesystem::temp_directory_path() / "cgraph-watcher-token-test";
+  std::filesystem::remove_all(token_root);
+  std::filesystem::create_directories(token_root);
+
+  cgraph::FileWatcher token_watcher(token_root, cgraph::FileWatcherOptions{.debounce = 50ms});
+  const auto t0 = cgraph::FileWatcherClock::time_point{} + 1000s;
+  (void)token_watcher.poll(t0);
+
+  const auto token_file = token_root / "src" / "target.py";
+  write_file(token_file, "x = 1\n");
+  (void)token_watcher.poll(t0 + 10ms);
+  const auto token_created = token_watcher.poll(t0 + 70ms);
+  if (token_created.size() != 1 ||
+      !has_event(token_created, token_file, cgraph::FileWatchChange::Created, cgraph::WatchedFileKind::Code)) {
+    return 1;
+  }
+
+  const auto original_mtime = std::filesystem::last_write_time(token_file);
+  write_file(token_file, "x = 2\n");
+  std::filesystem::last_write_time(token_file, original_mtime);
+
+  (void)token_watcher.poll(t0 + 80ms);
+  const auto token_modified = token_watcher.poll(t0 + 140ms);
+  if (token_modified.size() != 1 ||
+      !has_event(token_modified, token_file, cgraph::FileWatchChange::Modified, cgraph::WatchedFileKind::Code)) {
+    return 1;
+  }
+
+  // read_file_change_token returns a valid token for existing files
+  const auto token = cgraph::read_file_change_token(token_file);
+  if (token.device == 0 || token.inode == 0) {
+    return 1;
+  }
+
+  // read_file_change_token returns a zero token for nonexistent files
+  const auto missing_token = cgraph::read_file_change_token(token_root / "nonexistent.py");
+  if (missing_token.device != 0 || missing_token.inode != 0 ||
+      missing_token.ctime_sec != 0 || missing_token.ctime_nsec != 0) {
+    return 1;
+  }
+
+  std::filesystem::remove_all(token_root);
   std::filesystem::remove_all(root);
   return 0;
 }
