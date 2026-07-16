@@ -1,6 +1,7 @@
 #include "cgraph/daemon_endpoint.hpp"
 #include "cgraph/daemon_identity.hpp"
 #include "cgraph/daemon_server.hpp"
+#include "cgraph/index_persistence.hpp"
 #include "cgraph/protocol.hpp"
 
 #include <nlohmann/json.hpp>
@@ -88,6 +89,11 @@ int main() {
   const auto nodes_first = run_until_built(root, socket_path, 2);
   ok = ok && nodes_first >= 2;
   ok = ok && fs::exists(graph_path) && fs::exists(manifest_path);
+  const auto persisted_manifest = cgraph::read_index_manifest(manifest_path);
+  ok = ok && persisted_manifest.has_value() &&
+       persisted_manifest->content_root.algorithm == "sha256-merkle-v1" &&
+       persisted_manifest->content_root.sha256.size() == 64;
+  const auto persisted_root = persisted_manifest ? persisted_manifest->content_root.sha256 : std::string{};
 
   // Tamper the persisted graph with a sentinel, then restart over the unchanged
   // tree: the daemon must serve the sentinel (proving a disk load, not a rebuild).
@@ -97,6 +103,7 @@ int main() {
     cgraph::DaemonServerOptions options;
     options.idle_timeout = std::chrono::seconds(10);
     options.build_graph_on_start = true;
+    options.persist_interval = std::chrono::seconds::zero();
     int rc = -1;
     std::thread server([&] { rc = cgraph::run_daemon_server(root, options); });
     bool found = false;
@@ -105,6 +112,31 @@ int main() {
       if (!found) std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     ok = ok && found;  // Tier-1 load served the disk graph
+    const auto loaded_status = request_with_retry(socket_path, cgraph::make_request("status"));
+    ok = ok && loaded_status && (*loaded_status).value("ok", false) &&
+         (*loaded_status)["result"]["freshness"].value("content_root", std::string{}) == persisted_root;
+
+    // Fast-load must hydrate the verified file cache as well as the graph. A
+    // semantic-only mutation persists graph.json and the manifest without a
+    // source rescan; the manifest must retain all verified leaves so another
+    // unchanged restart can still take the fast path.
+    std::error_code mtime_error;
+    const auto manifest_mtime = fs::last_write_time(manifest_path, mtime_error);
+    const auto remembered = request_with_retry(
+        socket_path,
+        cgraph::make_request("remember", {{"title", "fast-load cache"}, {"body", "retain verified leaves"}}));
+    ok = ok && remembered && (*remembered).value("ok", false) && !mtime_error;
+    bool manifest_rewritten = false;
+    for (int attempt = 0; attempt < 100 && !manifest_rewritten; ++attempt) {
+      std::error_code current_mtime_error;
+      const auto current_mtime = fs::last_write_time(manifest_path, current_mtime_error);
+      manifest_rewritten = !current_mtime_error && current_mtime != manifest_mtime;
+      if (!manifest_rewritten) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    const auto repersisted_manifest = cgraph::read_index_manifest(manifest_path);
+    ok = ok && manifest_rewritten && repersisted_manifest.has_value() &&
+         repersisted_manifest->files.size() == 1 &&
+         repersisted_manifest->content_root.sha256 == persisted_root;
     (void)cgraph::request_over_unix_socket(socket_path, cgraph::make_request("shutdown"));
     server.join();
     (void)rc;

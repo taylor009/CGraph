@@ -48,6 +48,19 @@ bool has_source(const cgraph::GraphSnapshot& graph, const std::filesystem::path&
   return false;
 }
 
+cgraph::ContentRoot expected_content_root(const cgraph::IncrementalGraphIndex& index) {
+  std::vector<cgraph::FileCacheEntry> entries;
+  entries.reserve(index.cache.size());
+  for (const auto& [_, entry] : index.cache) {
+    entries.push_back(entry);
+  }
+  return cgraph::compute_content_root(index.project_root, entries);
+}
+
+bool same_content_root(const cgraph::ContentRoot& lhs, const cgraph::ContentRoot& rhs) {
+  return lhs.algorithm == rhs.algorithm && lhs.sha256 == rhs.sha256 && lhs.leaf_count == rhs.leaf_count;
+}
+
 int assert_watcher_overflow() {
   using namespace std::chrono_literals;
 
@@ -148,17 +161,95 @@ int assert_overflow_update_uses_full_rescan() {
   return 0;
 }
 
+int assert_content_verified_rescan_publishes_root() {
+  const auto root = std::filesystem::temp_directory_path() / "cgraph-incremental-content-rescan-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+
+  const auto alpha = root / "alpha.py";
+  const auto beta = root / "nested" / "beta.py";
+  write_file(alpha, "class Alpha:\n    pass\n");
+  write_file(beta, "class Beta:\n    pass\n");
+
+  cgraph::DaemonState state;
+  cgraph::IncrementalGraphIndex index;
+  auto result = cgraph::full_stat_index_rescan(state, index, root);
+  auto graph = cgraph::read_graph_snapshot(state);
+  if (result.files_hashed != 2 || result.bytes_hashed == 0 ||
+      result.files_reextracted != 2 || result.files_cache_hit != 0) {
+    std::filesystem::remove_all(root);
+    return 1;
+  }
+  if (graph->content_root.algorithm != "sha256-merkle-v1" || graph->content_root.sha256.size() != 64) {
+    std::filesystem::remove_all(root);
+    return 2;
+  }
+  if (graph->content_root.leaf_count != 2) {
+    std::filesystem::remove_all(root);
+    return 3;
+  }
+  if (!same_content_root(graph->content_root, expected_content_root(index))) {
+    std::filesystem::remove_all(root);
+    return 4;
+  }
+  const auto initial_root = graph->content_root;
+
+  result = cgraph::full_stat_index_rescan(state, index, root);
+  graph = cgraph::read_graph_snapshot(state);
+  if (result.files_hashed != 2 || result.bytes_hashed == 0 ||
+      result.files_reextracted != 0 || result.files_cache_hit != 2 ||
+      graph->content_root.sha256 != initial_root.sha256 || graph->content_root.leaf_count != 2 ||
+      !same_content_root(graph->content_root, expected_content_root(index))) {
+    std::filesystem::remove_all(root);
+    return 5;
+  }
+
+  const auto preserved_modified_at = std::filesystem::last_write_time(alpha);
+  write_file(alpha, "class Omega:\n    pass\n");
+  std::filesystem::last_write_time(alpha, preserved_modified_at);
+
+  result = cgraph::full_stat_index_rescan(state, index, root);
+  graph = cgraph::read_graph_snapshot(state);
+  if (result.files_hashed != 2 || result.bytes_hashed == 0 ||
+      result.files_reextracted != 1 || result.files_cache_hit != 1 || has_node_label(*graph, "Alpha") ||
+      !has_node_label(*graph, "Omega") || graph->content_root.sha256 == initial_root.sha256 ||
+      graph->content_root.leaf_count != 2 ||
+      !same_content_root(graph->content_root, expected_content_root(index))) {
+    std::filesystem::remove_all(root);
+    return 6;
+  }
+  const auto edited_root = graph->content_root;
+
+  std::filesystem::remove(beta);
+  result = cgraph::full_stat_index_rescan(state, index, root);
+  graph = cgraph::read_graph_snapshot(state);
+  if (result.files_hashed != 1 || result.bytes_hashed == 0 ||
+      result.files_reextracted != 0 || result.files_cache_hit != 1 || result.files_removed != 1 ||
+      has_node_label(*graph, "Beta") || graph->content_root.sha256 == edited_root.sha256 ||
+      graph->content_root.leaf_count != 1 ||
+      !same_content_root(graph->content_root, expected_content_root(index))) {
+    std::filesystem::remove_all(root);
+    return 7;
+  }
+
+  std::filesystem::remove_all(root);
+  return 0;
+}
+
 }  // namespace
 
 int main() {
-  if (assert_watcher_overflow() != 0) {
-    return 1;
+  if (const auto status = assert_watcher_overflow(); status != 0) {
+    return 10 + status;
   }
-  if (assert_explicit_rescan_replaces_stat_index() != 0) {
-    return 1;
+  if (const auto status = assert_explicit_rescan_replaces_stat_index(); status != 0) {
+    return 20 + status;
   }
-  if (assert_overflow_update_uses_full_rescan() != 0) {
-    return 1;
+  if (const auto status = assert_overflow_update_uses_full_rescan(); status != 0) {
+    return 30 + status;
+  }
+  if (const auto status = assert_content_verified_rescan_publishes_root(); status != 0) {
+    return 40 + status;
   }
   return 0;
 }

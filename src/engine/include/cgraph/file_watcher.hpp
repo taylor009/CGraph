@@ -1,11 +1,21 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <unordered_map>
 #include <vector>
 
 namespace cgraph {
+
+struct FileChangeToken {
+  std::uint64_t device = 0;
+  std::uint64_t inode = 0;
+  std::int64_t ctime_sec = 0;
+  long ctime_nsec = 0;
+
+  bool operator==(const FileChangeToken&) const = default;
+};
 
 using FileWatcherClock = std::chrono::steady_clock;
 
@@ -39,6 +49,7 @@ class FileWatcher {
     std::uintmax_t size = 0;
     std::filesystem::file_time_type modified_at{};
     WatchedFileKind kind = WatchedFileKind::Code;
+    FileChangeToken token{};
   };
 
   FileWatcher(std::filesystem::path root, FileWatcherOptions options = {});
@@ -58,6 +69,7 @@ class FileWatcher {
   std::unordered_map<std::string, PendingEvent> pending_;
 };
 
+[[nodiscard]] FileChangeToken read_file_change_token(const std::filesystem::path& path);
 [[nodiscard]] WatchedFileKind classify_watched_file(const std::filesystem::path& path);
 [[nodiscard]] bool is_watchable_file(const std::filesystem::path& path);
 

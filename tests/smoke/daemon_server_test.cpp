@@ -350,6 +350,83 @@ int main() {
   server2.join();
   expect(ok, server2_rc == 0, "second server exited cleanly");
 
+  // Verified update barrier: an equal-length source rewrite with its original
+  // mtime restored must still produce a different root. Live watching is off
+  // for this daemon, so the explicit update below is the only synchronizer.
+  const auto freshness_root = fs::temp_directory_path() / "cgraph_daemon_freshness_test";
+  fs::remove_all(freshness_root);
+  const auto before = std::string{"export function alpha() { return 1; }\n"};
+  const auto after = std::string{"export function omega() { return 1; }\n"};
+  expect(ok, before.size() == after.size(), "freshness rewrite preserves source length");
+  const auto freshness_source = freshness_root / "src" / "alpha.ts";
+  write_file(freshness_source, before);
+  const auto freshness_socket = cgraph::unix_socket_path(cgraph::daemon_identity_for(freshness_root));
+  fs::remove(freshness_socket);
+
+  cgraph::DaemonServerOptions freshness_options = options;
+  freshness_options.code_poll_interval = std::chrono::milliseconds::zero();
+  int freshness_rc = -1;
+  std::thread freshness_server([&] { freshness_rc = cgraph::run_daemon_server(freshness_root, freshness_options); });
+
+  const auto old_update = request_with_retry(freshness_socket, cgraph::make_request("update", {{"path", "."}}));
+  const bool old_update_has_freshness = old_update && (*old_update).contains("result") &&
+                                        (*old_update)["result"].contains("freshness");
+  const auto old_root = old_update_has_freshness
+                            ? (*old_update)["result"]["freshness"].value("content_root", std::string{})
+                            : std::string{};
+  expect(ok,
+         old_update && (*old_update).value("ok", false) && old_update_has_freshness &&
+             (*old_update)["result"]["freshness"].value("verified", false) &&
+             (*old_update)["result"]["freshness"].value("algorithm", std::string{}) == "sha256-merkle-v1" &&
+             !old_root.empty() && (*old_update)["result"].value("files_hashed", std::size_t{0}) == 1 &&
+             (*old_update)["result"].value("bytes_hashed", std::size_t{0}) == before.size() &&
+             (*old_update)["result"].contains("files_reextracted") &&
+             (*old_update)["result"].contains("files_cache_hit") && (*old_update)["result"].contains("files_removed"),
+         "verified update returns root identity and verification work counts");
+
+  if (!old_root.empty()) {
+    const auto preserved_mtime = fs::last_write_time(freshness_source);
+    write_file(freshness_source, after);
+    fs::last_write_time(freshness_source, preserved_mtime);
+
+    const auto new_update = request_with_retry(freshness_socket, cgraph::make_request("update", {{"path", "."}}));
+    const bool new_update_has_freshness = new_update && (*new_update).contains("result") &&
+                                          (*new_update)["result"].contains("freshness");
+    const auto new_root = new_update_has_freshness
+                              ? (*new_update)["result"]["freshness"].value("content_root", std::string{})
+                              : std::string{};
+    expect(ok,
+           new_update && (*new_update).value("ok", false) && new_update_has_freshness &&
+               (*new_update)["result"]["freshness"].value("verified", false) &&
+               (*new_update)["result"].value("files_hashed", std::size_t{0}) == 1 &&
+               (*new_update)["result"].value("bytes_hashed", std::size_t{0}) == after.size() &&
+               !new_root.empty() && new_root != old_root,
+           "preserved-mtime rewrite produces a new verified root");
+
+    const auto pinned_new = request_with_retry(
+        freshness_socket,
+        cgraph::make_request("query", {{"q", "omega"}, {"expected_content_root", new_root}}));
+    expect(ok,
+           pinned_new && (*pinned_new).value("ok", false) && !(*pinned_new)["result"]["nodes"].empty() &&
+               (*pinned_new)["result"]["freshness"].value("verified", false) &&
+               (*pinned_new)["result"]["freshness"].value("content_root", std::string{}) == new_root,
+           "new root pins a query to the updated snapshot");
+
+    const auto stale_query = request_with_retry(
+        freshness_socket,
+        cgraph::make_request("query", {{"q", "omega"}, {"expected_content_root", old_root}}));
+    expect(ok,
+           stale_query && !(*stale_query).value("ok", true) && !(*stale_query).contains("result"),
+           "old root is rejected without a graph result");
+  }
+
+  const auto freshness_shutdown =
+      request_with_retry(freshness_socket, cgraph::make_request("shutdown"));
+  expect(ok, freshness_shutdown && (*freshness_shutdown).value("ok", false), "freshness daemon shuts down cleanly");
+  freshness_server.join();
+  expect(ok, freshness_rc == 0, "freshness daemon exited cleanly");
+  fs::remove_all(freshness_root);
+
   // Never-idle + stale-socket reclaim on a fresh root. (a) A daemon started with
   // idle_timeout == 0 must reclaim a stale (non-live) socket file left at its
   // endpoint by a crashed predecessor and bind anyway. (b) It must stay resident

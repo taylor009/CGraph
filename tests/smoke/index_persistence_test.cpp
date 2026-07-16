@@ -4,7 +4,6 @@
 
 #include <filesystem>
 #include <fstream>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -43,7 +42,7 @@ int main() {
   // rebuild or re-sign, forcing a cold rebuild on the next query. The trailing
   // segment must therefore stay a short literal (bumped by hand on parity-surface
   // changes) and never a 64-char hex digest. Update this literal when you bump it.
-  if (key != "cgraph-index-v1:logic-2") {
+  if (key != "cgraph-index-v1:logic-3") {
     fs::remove_all(root);
     return 1;
   }
@@ -52,15 +51,25 @@ int main() {
   manifest.version_key = key;
   manifest.files.push_back(cgraph::read_file_cache_entry(a));
   manifest.files.push_back(cgraph::read_file_cache_entry(b));
+  manifest.content_root = cgraph::compute_content_root(root, manifest.files);
 
   // Round-trip: write then read yields an equal manifest.
   const auto manifest_path = root / "cgraph-out" / "index-manifest.json";
+  auto invalid_manifest = manifest;
+  invalid_manifest.content_root.sha256.clear();
+  if (cgraph::write_index_manifest(invalid_manifest, root / "invalid-manifest.json")) {
+    fs::remove_all(root);
+    return 1;
+  }
   if (!cgraph::write_index_manifest(manifest, manifest_path)) {
     fs::remove_all(root);
     return 1;
   }
   const auto loaded = cgraph::read_index_manifest(manifest_path);
-  if (!loaded || loaded->version_key != key || loaded->files.size() != 2) {
+  if (!loaded || loaded->version_key != key || loaded->files.size() != 2 ||
+      loaded->content_root.algorithm != manifest.content_root.algorithm ||
+      loaded->content_root.sha256 != manifest.content_root.sha256 ||
+      loaded->content_root.leaf_count != manifest.content_root.leaf_count) {
     fs::remove_all(root);
     return 1;
   }
@@ -80,7 +89,28 @@ int main() {
   };
 
   // Unchanged tree matches.
-  if (!cgraph::tree_matches_manifest(*loaded, unchanged)) {
+  if (!cgraph::tree_matches_manifest(*loaded, unchanged, root)) {
+    fs::remove_all(root);
+    return 1;
+  }
+  // The aggregate source identity is independently gated: a mismatched
+  // algorithm, digest, or leaf count rejects fast-load even when every
+  // individual file hash still matches.
+  auto wrong_algorithm = *loaded;
+  wrong_algorithm.content_root.algorithm = "sha256-merkle-v0";
+  if (cgraph::tree_matches_manifest(wrong_algorithm, unchanged, root)) {
+    fs::remove_all(root);
+    return 1;
+  }
+  auto wrong_digest = *loaded;
+  wrong_digest.content_root.sha256[0] = wrong_digest.content_root.sha256[0] == '0' ? '1' : '0';
+  if (cgraph::tree_matches_manifest(wrong_digest, unchanged, root)) {
+    fs::remove_all(root);
+    return 1;
+  }
+  auto wrong_leaf_count = *loaded;
+  ++wrong_leaf_count.content_root.leaf_count;
+  if (cgraph::tree_matches_manifest(wrong_leaf_count, unchanged, root)) {
     fs::remove_all(root);
     return 1;
   }
@@ -89,7 +119,7 @@ int main() {
   const std::vector<cgraph::DetectedFile> removed = {
       {.path = a, .language = cgraph::DetectedLanguage::Python},
   };
-  if (cgraph::tree_matches_manifest(*loaded, removed)) {
+  if (cgraph::tree_matches_manifest(*loaded, removed, root)) {
     fs::remove_all(root);
     return 1;
   }
@@ -99,16 +129,24 @@ int main() {
   write_file(c, "x = 2\n");
   std::vector<cgraph::DetectedFile> added = unchanged;
   added.push_back({.path = c, .language = cgraph::DetectedLanguage::Python});
-  if (cgraph::tree_matches_manifest(*loaded, added)) {
+  if (cgraph::tree_matches_manifest(*loaded, added, root)) {
     fs::remove_all(root);
     return 1;
   }
 
-  // Changed content does not match. Sleep so the new mtime differs from the
-  // cached one, forcing the hash comparison (and a Stale verdict).
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  write_file(a, "def f():\n    return 999\n");
-  if (cgraph::tree_matches_manifest(*loaded, unchanged)) {
+  // A same-length rewrite with the original mtime restored still does not
+  // match: startup validation must hash every detected file.
+  const auto preserved_modified_at = fs::last_write_time(a);
+  write_file(a, "def g():\n    return 2\n");
+  fs::last_write_time(a, preserved_modified_at);
+  if (cgraph::tree_matches_manifest(*loaded, unchanged, root)) {
+    fs::remove_all(root);
+    return 1;
+  }
+
+  // A pre-root manifest is unusable rather than silently upgraded.
+  write_file(root / "missing-root.json", "{\"version_key\":\"cgraph-index-v1:logic-2\",\"files\":[]}");
+  if (cgraph::read_index_manifest(root / "missing-root.json").has_value()) {
     fs::remove_all(root);
     return 1;
   }

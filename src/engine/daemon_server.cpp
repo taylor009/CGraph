@@ -236,7 +236,10 @@ int run_static_seam_server(const std::filesystem::path& root, DaemonServerOption
   state.update_handler = [&state, graph_path](const nlohmann::json&) -> nlohmann::json {
     if (load_graph_snapshot(state, graph_path)) {
       const auto graph = read_graph_snapshot(state);
-      return {{"reloaded", true}, {"nodes", graph->nodes.size()}, {"edges", graph->edges.size()}};
+      return {{"reloaded", true},
+              {"nodes", graph->nodes.size()},
+              {"edges", graph->edges.size()},
+              {"freshness", freshness_metadata(*graph)}};
     }
     return {{"reloaded", false}};
   };
@@ -490,6 +493,7 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
   const auto persist_manifest = [&]() {
     IndexManifest manifest;
     manifest.version_key = index_version_key();
+    manifest.content_root = read_graph_snapshot(state)->content_root;
     manifest.files.reserve(index.cache.size());
     for (const auto& [_, entry] : index.cache) {
       manifest.files.push_back(entry);
@@ -525,29 +529,52 @@ int run_daemon_server(const std::filesystem::path& root, DaemonServerOptions opt
     return nlohmann::json{
         {"accepted", true},
         {"full_rescan", result.full_rescan},
+        {"files_hashed", result.files_hashed},
+        {"bytes_hashed", result.bytes_hashed},
         {"files_reextracted", result.files_reextracted},
+        {"files_cache_hit", result.files_cache_hit},
         {"files_removed", result.files_removed},
         {"node_count", graph->nodes.size()},
         {"edge_count", graph->edges.size()},
+        {"freshness", freshness_metadata(*graph)},
     };
   };
 
   // Tier-1 fast path: if the persisted manifest's version key still matches this
-  // binary and every detected file is a stat/hash hit against it (no files added
-  // or removed), load the persisted graph and overlay semantic drops instead of
-  // re-extracting. Returns false (rebuild needed) on any miss.
+  // binary and a full-content read reproduces its file hashes and root, load the
+  // persisted graph and overlay semantic drops instead of re-extracting. Hold
+  // the writer lock across verification and publication so a concurrent explicit
+  // update cannot be overwritten by an older startup snapshot.
   const auto try_load_persisted = [&]() -> bool {
+    const std::scoped_lock lock(graph_mutex);
     const auto manifest = read_index_manifest(manifest_path);
     if (!manifest || manifest->version_key != index_version_key()) {
       return false;
     }
     const auto detected = detect_project_files(identity.project_root);
-    if (!tree_matches_manifest(*manifest, detected)) {
+    if (!tree_matches_manifest(*manifest, detected, identity.project_root)) {
       return false;
     }
-    const std::scoped_lock lock(graph_mutex);
-    if (!load_graph_snapshot(state, graph_path)) {
+    // Parse through an isolated state, then attach the verified manifest root
+    // before the loaded snapshot becomes visible to daemon reads. Publishing
+    // directly and mutating afterward would briefly expose a rootless snapshot.
+    DaemonState persisted_state;
+    if (!load_graph_snapshot(persisted_state, graph_path)) {
       return false;
+    }
+    auto graph = *read_graph_snapshot(persisted_state);
+    graph.content_root = manifest->content_root;
+    publish_graph_snapshot(state, std::move(graph));
+    // The persisted graph does not hydrate extraction fragments, but its file
+    // entries were just content-verified and remain the canonical manifest
+    // source until the first full rescan. Without this cache hydration, a
+    // semantic-only persist after fast-load would overwrite the manifest with
+    // an empty file set and waste the next restart's fast path.
+    index.project_root = identity.project_root;
+    index.cache.clear();
+    index.cache.reserve(manifest->files.size());
+    for (const auto& entry : manifest->files) {
+      index.cache.emplace(incremental_file_key(entry.path), entry);
     }
     // The fast path skips the rescan that normally populates the coverage map;
     // compute it from the detection walk this path already did.

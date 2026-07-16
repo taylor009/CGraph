@@ -1,6 +1,7 @@
 #include "cgraph/file_extraction.hpp"
 
 #include "cgraph/configured_extractors.hpp"
+#include "cgraph/file_cache.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -55,6 +56,7 @@ ExtractionResult extract_detected_file(const DetectedFile& file) {
   ExtractionResult empty;
   try {
     const auto source = read_file(file.path);
+    empty.source_sha256 = sha256_hex(source);
     auto result = extract_configured_language(
         file.language,
         ExtractionContext{
@@ -62,6 +64,7 @@ ExtractionResult extract_detected_file(const DetectedFile& file) {
             .source = source,
         });
     if (result.has_value()) {
+      result->source_sha256 = empty.source_sha256;
       return *result;
     }
 

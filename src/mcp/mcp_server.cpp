@@ -53,13 +53,21 @@ namespace {
           {{"query", string_param("substring of the symbol name or id to find")},
            {"kind", string_param("only nodes of this kind, e.g. function, class, file")},
            {"file", string_param("only nodes whose source file path contains this substring")},
-           {"limit", integer_param("max results (default 50)")}}),
+           {"limit", integer_param("max results (default 50)")},
+           {"expected_content_root",
+            string_param("content root returned by graph_update; if supplied, the response comes "
+                         "only from the matching snapshot and errors if the daemon has published "
+                         "a different root")}}),
       tool_schema(
           "graph_path",
           "Shortest connection between two symbols (how A relates to B through calls, imports, "
           "containment). Accepts node ids or exact symbol names.",
           {{"source", string_param("node id or exact symbol name to start from")},
-           {"target", string_param("node id or exact symbol name to reach")}}),
+           {"target", string_param("node id or exact symbol name to reach")},
+           {"expected_content_root",
+            string_param("content root returned by graph_update; if supplied, the response comes "
+                         "only from the matching snapshot and errors if the daemon has published "
+                         "a different root")}}),
       tool_schema(
           "graph_explain",
           "One symbol in depth: its source snippet plus its neighbor edges (most important first). "
@@ -73,7 +81,11 @@ namespace {
                           {"description", "in = callers/importers only, out = callees/imports only (default both)"}}},
            {"relation", string_param("only edges of this relation (exact, case-sensitive), e.g. CALLS, "
                                      "references, imports, inherits, contains")},
-           {"limit", integer_param("max neighbor edges returned (default 100)")}}),
+           {"limit", integer_param("max neighbor edges returned (default 100)")},
+           {"expected_content_root",
+            string_param("content root returned by graph_update; if supplied, the response comes "
+                         "only from the matching snapshot and errors if the daemon has published "
+                         "a different root")}}),
       tool_schema(
           "graph_impact",
           "Transitive blast radius of a symbol: dependents (callers/importers that break if it "
@@ -84,7 +96,11 @@ namespace {
                           {"description", "default dependents"}}},
            {"relation", string_param("only follow edges of this relation, e.g. CALLS, IMPORTS")},
            {"max_depth", integer_param("hops to traverse (default 3)")},
-           {"limit", integer_param("max nodes returned (default 200)")}}),
+           {"limit", integer_param("max nodes returned (default 200)")},
+           {"expected_content_root",
+            string_param("content root returned by graph_update; if supplied, the response comes "
+                         "only from the matching snapshot and errors if the daemon has published "
+                         "a different root")}}),
       tool_schema(
           "graph_context",
           "Token-budgeted context bundle for a symbol: the focal node plus its most relevant "
@@ -104,12 +120,23 @@ namespace {
                                        "query-relevant nodes (default; give it a query/q); fixed = plain "
                                        "k-hop neighborhood"}}},
            {"gather_theta", {{"type", "number"},
-                             {"description", "adaptive gate: min query-term overlap to expand past 2 hops (default 0.05)"}}}}),
+                             {"description", "adaptive gate: min query-term overlap to expand past 2 hops (default 0.05)"}}},
+           {"expected_content_root",
+            string_param("content root returned by graph_update; if supplied, the response comes "
+                         "only from the matching snapshot and errors if the daemon has published "
+                         "a different root")}}),
       tool_schema(
           "graph_update",
-          "Force an immediate full rescan of the project. Usually unnecessary: the daemon watches "
-          "the project tree and folds file changes into the graph automatically within seconds. "
-          "Blocks until the rescan finishes.",
+          "Blocking content-verified synchronization barrier: reads and hashes every detected "
+          "code file, re-extracts any file whose content changed, and publishes a new snapshot. "
+          "Returns freshness.content_root plus files_hashed and bytes_hashed verification counts. "
+          "The root uniquely identifies the verified source snapshot. Pass it as "
+          "expected_content_root to graph_query / graph_path / "
+          "graph_explain / graph_impact / graph_context to pin those reads to the same verified "
+          "snapshot; a mismatch fails closed without returning graph data. Use before any "
+          "freshness-sensitive navigation or after editing source files. The daemon also watches "
+          "the tree and folds edits in automatically within seconds, but only graph_update "
+          "provides a cryptographically verified content_root.",
           {{"path", string_param("project-relative path hint; \".\" rescans the whole project")}}),
       tool_schema(
           "graph_status",

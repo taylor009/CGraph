@@ -25,7 +25,7 @@ namespace {
 // golden/parity tests catch an *unintended* output change; bumping this key on an
 // *intended* one is an author/reviewer responsibility, like any on-disk schema
 // version.
-constexpr const char* kIndexVersionKey = "cgraph-index-v1:logic-2";
+constexpr const char* kIndexVersionKey = "cgraph-index-v1:logic-3";
 
 [[nodiscard]] std::string normalized_key(const std::filesystem::path& path) {
   return path.lexically_normal().generic_string();
@@ -46,6 +46,9 @@ std::string index_version_key() {
 }
 
 bool write_index_manifest(const IndexManifest& manifest, const std::filesystem::path& path) {
+  if (manifest.version_key.empty() || !is_valid_content_root(manifest.content_root)) {
+    return false;
+  }
   auto files = nlohmann::json::array();
   for (const auto& entry : manifest.files) {
     files.push_back(nlohmann::json{
@@ -57,6 +60,12 @@ bool write_index_manifest(const IndexManifest& manifest, const std::filesystem::
   }
   const nlohmann::json document{
       {"version_key", manifest.version_key},
+      {"content_root",
+       {
+           {"algorithm", manifest.content_root.algorithm},
+           {"sha256", manifest.content_root.sha256},
+           {"leaf_count", manifest.content_root.leaf_count},
+       }},
       {"files", std::move(files)},
   };
 
@@ -95,6 +104,10 @@ std::optional<IndexManifest> read_index_manifest(const std::filesystem::path& pa
     const auto document = nlohmann::json::parse(input);
     IndexManifest manifest;
     manifest.version_key = document.at("version_key").get<std::string>();
+    const auto& content_root = document.at("content_root");
+    manifest.content_root.algorithm = content_root.at("algorithm").get<std::string>();
+    manifest.content_root.sha256 = content_root.at("sha256").get<std::string>();
+    manifest.content_root.leaf_count = content_root.at("leaf_count").get<std::size_t>();
     for (const auto& entry : document.at("files")) {
       FileCacheEntry file;
       file.path = std::filesystem::path(entry.at("path").get<std::string>());
@@ -103,14 +116,21 @@ std::optional<IndexManifest> read_index_manifest(const std::filesystem::path& pa
       file.sha256 = entry.at("sha256").get<std::string>();
       manifest.files.push_back(std::move(file));
     }
+    if (!is_valid_content_root(manifest.content_root)) {
+      return std::nullopt;
+    }
     return manifest;
   } catch (const nlohmann::json::exception&) {
     return std::nullopt;
   }
 }
 
-bool tree_matches_manifest(const IndexManifest& manifest, std::span<const DetectedFile> detected) {
-  if (manifest.files.size() != detected.size()) {
+bool tree_matches_manifest(
+    const IndexManifest& manifest,
+    std::span<const DetectedFile> detected,
+    const std::filesystem::path& project_root) {
+  if (project_root.empty() || !is_valid_content_root(manifest.content_root) ||
+      manifest.files.size() != detected.size()) {
     return false;  // a file was added or removed
   }
   std::unordered_map<std::string, const FileCacheEntry*> by_key;
@@ -118,17 +138,28 @@ bool tree_matches_manifest(const IndexManifest& manifest, std::span<const Detect
   for (const auto& entry : manifest.files) {
     by_key.emplace(normalized_key(entry.path), &entry);
   }
+  if (by_key.size() != manifest.files.size()) {
+    return false;  // duplicate leaf paths cannot describe a complete file set
+  }
+
+  std::vector<FileCacheEntry> verified;
+  verified.reserve(detected.size());
   for (const auto& file : detected) {
     const auto found = by_key.find(normalized_key(file.path));
     if (found == by_key.end()) {
       return false;  // detected file absent from the manifest
     }
-    const auto classification = classify_cached_file(file.path, *found->second);
-    if (classification.state != CacheState::StatHit && classification.state != CacheState::HashHit) {
+    const auto classification =
+        classify_cached_file(file.path, *found->second, CacheValidation::Content);
+    if (classification.state != CacheState::HashHit || !classification.current.has_value()) {
       return false;  // content changed (or vanished)
     }
+    verified.push_back(*classification.current);
   }
-  return true;
+  const auto verified_root = compute_content_root(project_root, verified);
+  return manifest.content_root.algorithm == verified_root.algorithm &&
+         manifest.content_root.sha256 == verified_root.sha256 &&
+         manifest.content_root.leaf_count == verified_root.leaf_count;
 }
 
 }  // namespace cgraph
