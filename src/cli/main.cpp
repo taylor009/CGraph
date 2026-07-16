@@ -525,6 +525,14 @@ std::filesystem::path supervisor_config_path() {
 
 // cgraph daemon <install|sync|status|uninstall> [flags]
 int run_daemon_command(int argc, char** argv) {
+#if !defined(__APPLE__)
+  (void)argc;
+  (void)argv;
+  std::cerr << "cgraph daemon: launchd-based supervision is only supported on macOS. "
+               "On this platform run `graphd --root PATH` directly (or supervise it "
+               "with your init system, e.g. a systemd user unit).\n";
+  return 1;
+#endif
   const std::string sub = argc >= 3 ? argv[2] : "";
   if (sub != "install" && sub != "sync" && sub != "status" && sub != "uninstall") {
     std::cerr << "usage: cgraph daemon <install|sync|status|uninstall> "
@@ -683,6 +691,14 @@ int run_skills_command(int argc, char** argv) {
 // cgraph drain <install|status|uninstall> [--interval SECONDS] [--chunk-cap N]
 //              [--script PATH] [--launch-agents-dir DIR] [--client PATH]
 int run_drain_command(int argc, char** argv) {
+#if !defined(__APPLE__)
+  (void)argc;
+  (void)argv;
+  std::cerr << "cgraph drain: the launchd-based enrichment drainer is only supported on "
+               "macOS. On this platform run integrations/always-on/cgraph-enrich-drain.sh "
+               "on a schedule (e.g. cron or a systemd timer).\n";
+  return 1;
+#endif
   const std::string sub = argc >= 3 ? argv[2] : "";
   if (sub != "install" && sub != "status" && sub != "uninstall") {
     std::cerr << "usage: cgraph drain <install|status|uninstall> [--interval SECONDS] "
