@@ -70,14 +70,22 @@ vendor/           Vendored tree-sitter core and grammars
 - Git
 - vcpkg (a local copy is fine — see step 2). Dependencies `curl`, `igraph`,
   `nlohmann-json`, and `utf8proc` are declared in `vcpkg.json` and built
-  automatically on first configure. `tree-sitter` is vendored under
-  `vendor/tree-sitter`.
+  automatically on first configure. `tree-sitter` is vendored as git
+  submodules under `vendor/tree-sitter` (see step 1).
 
 ### 1. Clone
 
 ```sh
-git clone https://github.com/taylor009/CGraph.git
+git clone --recurse-submodules https://github.com/taylor009/CGraph.git
 cd CGraph
+```
+
+The tree-sitter core and grammars under `vendor/tree-sitter` are git
+submodules — the build fails without them. If you already cloned without
+`--recurse-submodules`, fetch them with:
+
+```sh
+git submodule update --init --recursive
 ```
 
 ### 2. Point CMake at vcpkg
