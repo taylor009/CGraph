@@ -26,7 +26,7 @@
 ## 5. End-to-End Verification and Delivery
 
 - [x] 5.1 Configure and build the isolated worktree, then run all focused cache/watcher/incremental/persistence/daemon/MCP tests and record pass counts.
-- [ ] 5.2 Run the full default and sanitizer suites on macOS, and verify CI covers the same platform-sensitive code on Ubuntu.
+- [x] 5.2 Run the full default and sanitizer suites on macOS, and verify CI covers the same platform-sensitive code on Ubuntu.
 - [x] 5.3 Run a real temporary-repository daemon flow for edit/add/delete, content-verified update, root-pinned query, persistence, and restart; clean up every created process and fixture.
 - [x] 5.4 Benchmark verified update work (files, bytes, wall time) and warmed ordinary query latency, confirming ordinary reads do not perform the full-content audit.
 - [x] 5.5 Review the implementation against every OpenSpec scenario, update all task checkboxes, and prepare evidence for the PR.
