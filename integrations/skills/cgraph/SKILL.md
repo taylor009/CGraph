@@ -25,7 +25,8 @@ grep/read calls that burn context.
 | "What does X rely on?" | `graph_impact` `{id, direction:"dependencies"}` |
 | "How does A connect to B?" | `graph_path` `{source, target}` — shortest path, with `path_nodes` briefs |
 | "Load context on X" / before editing or reviewing X | `graph_context` `{query or id, budget}` — focal node + most-relevant neighbors with snippets, packed to a token budget |
-| "Is the graph current? / I just changed files" | Nothing, usually — the daemon watches the tree and folds edits in within seconds. `graph_update {path:"."}` forces an immediate full rescan. |
+| "Verify the graph is current before I rely on it" | `graph_update {path:"."}` — blocking content-verified synchronization; returns `freshness.content_root`. Pin subsequent reads by passing the root as `expected_content_root`. |
+| "Is the graph current? / I just changed files" | Nothing for ordinary reads — the daemon watches the tree and folds edits in within seconds. Use `graph_update` when you need a verified content_root to pin reads. |
 
 ## How to use the results
 
@@ -50,6 +51,34 @@ grep/read calls that burn context.
   signature or deleting a symbol: it lists everything that would be affected,
   by depth.
 
+## Freshness-sensitive navigation
+
+When a task must rely on the graph being current with the worktree — before impact
+analysis of a symbol you just moved, or after a batch of file edits — use the
+synchronize-then-pin pattern:
+
+```
+1. update = graph_update {path: "."}
+2. root = update.freshness.content_root
+3. graph_query / graph_explain / graph_impact / graph_path / graph_context
+       {…, expected_content_root: root}
+```
+
+`graph_update` is a blocking content-verified barrier: it hashes every detected
+code file and re-extracts any whose content changed. The returned
+`freshness.content_root` uniquely identifies that source snapshot. The response
+also reports `files_hashed` and `bytes_hashed`. Passing the root as
+`expected_content_root` on a subsequent read pins the response to the same
+snapshot; the daemon returns an
+error instead of graph data if it has published a different root since then.
+
+Ordinary reads (without `expected_content_root`) do not scan the filesystem. They
+read the latest published snapshot and return its `freshness` metadata; during
+startup or for non-source seam graphs, `freshness.verified` can be `false`. The
+daemon keeps source-backed snapshots current through automatic file watching.
+Use synchronization and a pin when you need proof that the graph matches specific
+source content.
+
 ## Practicalities
 
 - The `cgraph` MCP server must be registered (it auto-spawns a per-project daemon
@@ -60,8 +89,7 @@ grep/read calls that burn context.
   seconds or poll `graph_status` until `build_state` is `"ready"`.
 - The daemon watches the project tree (`graph_status` reports `watching`): file
   edits land in the graph automatically within a few seconds, and the graph is
-  re-persisted in the background. You only need `graph_update {path:"."}` to
-  force an immediate, fully-reconciled rescan.
+  re-persisted in the background.
 - Fall back to grep/read only when cgraph genuinely has no answer — e.g. a
   string literal, a comment, a config value, or a file type cgraph does not
   extract. For symbols and their relationships, prefer the graph.

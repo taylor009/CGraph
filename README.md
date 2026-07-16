@@ -212,7 +212,7 @@ of blind grep/read. It exposes eight tools:
 | `graph_impact` | Transitive blast radius of changing a node |
 | `graph_path` | Shortest path between two nodes |
 | `graph_context` | Token-budgeted source bundle for a node/query |
-| `graph_update` | Force a full rescan (the daemon also watches the tree and updates automatically) |
+| `graph_update` | Blocking content-verified synchronization; returns `freshness.content_root` to pin subsequent reads |
 | `graph_status` | Daemon, graph, and enrichment status |
 | `graph_shutdown` | Stop the daemon |
 
