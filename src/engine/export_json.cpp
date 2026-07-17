@@ -639,6 +639,22 @@ function seededUnit(seed) {
   return x - Math.floor(x);
 }
 
+// True when every node carries a server-precomputed x/y (igraph layout stamped
+// into node.properties by the C++ engine). When present we adopt those as final
+// positions and skip the browser force simulation entirely, so a large graph
+// renders near-instantly instead of paying an O(N^2) per-frame cool-down.
+function hasEmbeddedLayout() {
+  if (nodes.length === 0) return false;
+  for (const node of nodes) {
+    const props = node.properties;
+    if (!props) return false;
+    const x = Number(props.x);
+    const y = Number(props.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+  }
+  return true;
+}
+
 function layout() {
   if (layoutReady) return;
   const box = canvas.getBoundingClientRect();
@@ -648,6 +664,18 @@ function layout() {
   const centerY = sim.height / 2;
   // Ideal edge length scales with available area per node.
   sim.k = Math.max(34, Math.sqrt((sim.width * sim.height) / Math.max(nodes.length, 1)));
+  // Precomputed layout: adopt server x/y verbatim (fitToScreen maps the layout's
+  // arbitrary coordinate scale into the viewport), then leave the simulation
+  // cold so nothing moves and settle time is effectively zero.
+  if (hasEmbeddedLayout()) {
+    for (const node of nodes) {
+      node.x = Number(node.properties.x);
+      node.y = Number(node.properties.y);
+    }
+    sim.alpha = 0;
+    layoutReady = true;
+    return;
+  }
   // Seed each community around a ring so distinct clusters start in distinct
   // regions; members land near their community anchor with seeded jitter. The
   // centroid force in simulationTick then keeps them together while edges shape
@@ -931,6 +959,15 @@ let animationHandle = 0;
 let autoFitPending = true;
 function runSimulation() {
   if (animationHandle) cancelAnimationFrame(animationHandle);
+  // Precomputed layout (or a fully cooled sim): positions are final, so skip the
+  // O(N^2) simulationTick entirely and just fit + draw a single static frame.
+  // This is the fast path that drops large-graph settle time toward zero.
+  if (sim.alpha <= 0.02) {
+    if (autoFitPending) { fitToScreen(); autoFitPending = false; }
+    draw();
+    animationHandle = 0;
+    return;
+  }
   const tick = () => {
     // A few ticks per frame settle the layout quickly without a visible crawl.
     for (let i = 0; i < 2; ++i) simulationTick();
