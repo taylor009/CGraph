@@ -11,6 +11,7 @@ namespace {
 
 extern "C" const TSLanguage* tree_sitter_c();
 extern "C" const TSLanguage* tree_sitter_cpp();
+extern "C" const TSLanguage* tree_sitter_c_sharp();
 extern "C" const TSLanguage* tree_sitter_go();
 extern "C" const TSLanguage* tree_sitter_groovy();
 extern "C" const TSLanguage* tree_sitter_java();
@@ -66,6 +67,28 @@ extern "C" const TSLanguage* tree_sitter_tsx();
       .name_fields = {"name"},
       .body_fields = {"body"},
       .call_accessor_fields = {"name"},
+  };
+}
+
+[[nodiscard]] LanguageConfig csharp_config() {
+  return LanguageConfig{
+      .name = "csharp",
+      .grammar_name = "tree-sitter-c-sharp",
+      .extensions = {".cs"},
+      .class_node_types = {"class_declaration", "interface_declaration", "struct_declaration",
+                           "enum_declaration", "record_declaration", "namespace_declaration"},
+      .function_node_types = {"method_declaration", "constructor_declaration",
+                              "local_function_statement"},
+      .import_node_types = {"using_directive"},
+      .call_node_types = {"invocation_expression", "object_creation_expression"},
+      .name_fields = {"name"},
+      .body_fields = {"body"},
+      .call_accessor_fields = {"function"},
+      // `obj.Method()` / `Type.Static()` targets are member_access_expressions;
+      // record the bare member name as a same-file member call, mirroring Go's
+      // selector_expression handling (the receiver/type is not name-guessed).
+      .call_member_node_types = {"member_access_expression"},
+      .call_member_field = "name",
   };
 }
 
@@ -209,6 +232,8 @@ const TSLanguage* tree_sitter_language_for(DetectedLanguage language) {
       return tree_sitter_c();
     case DetectedLanguage::Cpp:
       return tree_sitter_cpp();
+    case DetectedLanguage::CSharp:
+      return tree_sitter_c_sharp();
     case DetectedLanguage::Go:
       return tree_sitter_go();
     case DetectedLanguage::Groovy:
@@ -240,6 +265,8 @@ std::optional<LanguageConfig> config_for_language(DetectedLanguage language) {
       return c_config();
     case DetectedLanguage::Cpp:
       return cpp_config();
+    case DetectedLanguage::CSharp:
+      return csharp_config();
     case DetectedLanguage::Go:
       return go_config();
     case DetectedLanguage::Groovy:

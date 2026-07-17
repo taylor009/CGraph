@@ -25,7 +25,7 @@ int main() {
              "package main\n\ntype Service struct{}\n\nfunc (s *Service) Run() {\n\thelper()\n}\n\nfunc helper() {}\n");
   // Detected but extractorless: must surface in the unextracted coverage map,
   // not vanish behind a per-file warning.
-  write_file(root / "legacy.cs", "class Legacy { void Run() {} }\n");
+  write_file(root / "view.blade.php", "<div>{{ $user->name }}</div>\n");
 
   const auto result = cgraph::run_one_shot(root);
   if (result.file_count != 3 || result.graph.nodes.empty()) {
@@ -46,7 +46,7 @@ int main() {
     return 6;
   }
 
-  if (result.stats.unextracted.size() != 1 || result.stats.unextracted.at("csharp") != 1) {
+  if (result.stats.unextracted.size() != 1 || result.stats.unextracted.at("php-blade") != 1) {
     std::filesystem::remove_all(root);
     return 7;
   }
@@ -73,7 +73,7 @@ int main() {
   const auto stats_json = cgraph::build_stats_json(stats);
   if (stats_json["node_count"] != result.graph.nodes.size() ||
       stats_json.contains("cache_saved_ms_estimate") ||
-      stats_json["unextracted"]["csharp"] != 1) {
+      stats_json["unextracted"]["php-blade"] != 1) {
     std::filesystem::remove_all(root);
     return 5;
   }
