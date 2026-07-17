@@ -30,7 +30,7 @@ run the binaries from the build tree (or symlink them onto your `PATH`). See
 - Deterministic project scanning with root `.gitignore` support and built-in
   skips for generated or dependency directories such as `build`, `dist`,
   `node_modules`, `target`, `vendor`, and `cgraph-out`.
-- Tree-sitter-backed extraction for C, C++, Go, Groovy, Java, JavaScript,
+- Tree-sitter-backed extraction for C, C++, C#, Go, Groovy, Java, JavaScript,
   Kotlin, Python, Ruby, Scala, TypeScript, and TSX.
 - Regex or structured extraction for Apex, Delphi form/source files, MSBuild/XML
   project files, and MCP config files.
