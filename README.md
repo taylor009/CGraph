@@ -67,11 +67,21 @@ vendor/           Vendored tree-sitter core and grammars
 - CMake 3.25 or newer
 - Ninja
 - A C++20 compiler (recent Clang or GCC; Apple Clang from Xcode Command Line Tools works)
+- A Fortran compiler (e.g. `gfortran`). `igraph`'s vcpkg build pulls in
+  `lapack-reference`, whose configure aborts without one (`Unable to find a
+  Fortran compiler using 'CMakeDetermineFortranCompiler'`). Install it before the
+  first configure — `sudo apt-get install -y gfortran` (Debian/Ubuntu),
+  `sudo dnf install -y gcc-gfortran` (Fedora), `brew install gcc` (macOS).
+  (Verified required on Linux/aarch64; not needed if your toolchain already
+  provides Fortran.)
 - Git
 - vcpkg (a local copy is fine — see step 2). Dependencies `curl`, `igraph`,
   `nlohmann-json`, and `utf8proc` are declared in `vcpkg.json` and built
   automatically on first configure. `tree-sitter` is vendored as git
-  submodules under `vendor/tree-sitter` (see step 1).
+  submodules under `vendor/tree-sitter` (see step 1). Clone vcpkg at **full
+  depth** (as step 2 does) — a `--depth 1` shallow clone omits the manifest's
+  pinned baseline commit and fails first configure with `failed to 'git show'
+  versions/baseline.json`.
 
 ### 1. Clone
 
