@@ -14,7 +14,26 @@
 
 </div>
 
----
+## Contents
+
+[Why CGraph?](#why-cgraph) ·
+[Architecture](#architecture) ·
+[Repository layout](#repository-layout) ·
+[What it produces](#what-it-produces) ·
+[Output formats](#output-formats) ·
+[Performance](#performance) ·
+[Languages](#languages) ·
+[Quick start](#quick-start) ·
+[Install & Setup](#install--setup) ·
+[Use with coding agents](#use-with-coding-agents) ·
+[CLI](#cli) ·
+[Daemon & thin client](#daemon--thin-client) ·
+[MCP server](#mcp-server) ·
+[Host integrations](#host-integrations) ·
+[Semantic enrichment](#semantic-enrichment) ·
+[Development notes](#development-notes) ·
+[Contributing](#contributing) ·
+[License](#license)
 
 ## Why CGraph?
 
@@ -40,6 +59,21 @@ Reading a large repo to answer **"what calls this?"** or **"what breaks if I cha
 
 The engine owns deterministic extraction, fragment validation, cache state, and local graph mutation; hosts own model choice and semantic enrichment.
 
+## Repository layout
+
+```text
+src/cli/          One-shot CLI entrypoint: cgraph
+src/daemon/       Daemon entrypoint: graphd
+src/client/       Thin client runtime and cgraph-client executable
+src/mcp/          MCP request handling and cgraph-mcp executable
+src/engine/       Detection, extraction, graph building, analysis, daemon ops
+tests/smoke/      CTest smoke coverage for engine, daemon, MCP, and integration paths
+tests/fuzz/       Optional libFuzzer targets
+integrations/     Host hook and always-on integration scripts
+docs/             Host integration contract and benchmark notes
+vendor/           Vendored tree-sitter core and grammars
+```
+
 ## What it produces
 
 A single scan turns a source tree into an interactive, explorable graph — communities colored, hubs sized by centrality:
@@ -47,6 +81,15 @@ A single scan turns a source tree into an interactive, explorable graph — comm
 <div align="center"><img src="assets/graph-example.png" alt="CGraph interactive viewer on a 10,708-node codebase" width="90%"></div>
 
 <sub>The real `graph.html` viewer on a 10,708-node / 28,945-edge codebase — self-contained HTML, no external JS.</sub>
+
+## Output formats
+
+- `graph.json` — directed node-link JSON with graph metadata, nodes, and links
+- `graph.html` — browser-readable interactive graph view
+- `graph.svg` — static graph visualization
+- `obsidian.md` — markdown export for Obsidian-style navigation
+- `cypher.txt` — Neo4j Cypher statements
+- `call-flow.html` — browser-readable call-flow view
 
 ## Performance
 
@@ -94,37 +137,18 @@ build/default/src/cli/cgraph --root . --out cgraph-out
 open cgraph-out/graph.html
 ```
 
-## Use with coding agents
-
-`cgraph-mcp` is a standard [MCP](https://modelcontextprotocol.io) server over stdio (protocol `2024-11-05`). Register it once and your agent navigates the codebase through fast graph queries instead of blind grep/read:
-
-| Tool | Purpose |
-| --- | --- |
-| `graph_query` | Search nodes by text; ranked by centrality |
-| `graph_explain` | A node's neighborhood (callers, callees, imports) |
-| `graph_impact` | Transitive blast radius of changing a node |
-| `graph_path` | Shortest path between two nodes |
-| `graph_context` | Token-budgeted source bundle for a node/query (with adaptive gather) |
-| `graph_update` | Content-verified sync; returns a `content_root` to pin reads |
-| `graph_status` | Daemon, graph, and enrichment status |
-| `graph_remember` / `graph_recall` | Session memory — checkpoint before `/compact`, recall after |
-
-**Claude Code** (one registration works across every project via `CLAUDE_PROJECT_DIR`):
-
-```sh
-claude mcp add --scope user --transport stdio cgraph \
-  -- /abs/path/to/CGraph/build/default/src/mcp/cgraph-mcp \
-     --daemon /abs/path/to/CGraph/build/default/src/daemon/graphd
-```
-
-This repo also ships host skills under `integrations/skills/` — `cgraph` (reach for the graph first on structure questions) and `cgraph-enrich` (the semantic-enrichment loop). Install them with `cgraph skills install`.
-
 ## Install & Setup
 
 > **Status:** early native implementation. The full command surface (CLI, daemon, thin client, MCP server) is present and tested; there is no packaged release yet — you build from source with CMake + vcpkg and run the binaries from the build tree (or symlink them onto your `PATH`).
 
-<details>
-<summary><strong>Full build recipe, PATH setup, and sanitizer/fuzzer presets</strong></summary>
+### Prerequisites
+
+- CMake 3.25 or newer
+- Ninja
+- A C++20 compiler (recent Clang or GCC; Apple Clang from Xcode Command Line Tools works)
+- A Fortran compiler (e.g. `gfortran`) — `igraph`'s vcpkg build pulls in `lapack-reference`, which needs one (`sudo apt-get install -y gfortran` / `brew install gcc`)
+- Git
+- vcpkg (a local copy is fine — see step 2). `curl`, `igraph`, `nlohmann-json`, and `utf8proc` are declared in `vcpkg.json` and built on first configure. `tree-sitter` is vendored under `vendor/tree-sitter`.
 
 ### 1. Clone (with submodules)
 
@@ -142,14 +166,12 @@ git clone https://github.com/microsoft/vcpkg .vcpkg   # full depth — a shallow
 export VCPKG_ROOT="$PWD/.vcpkg"
 ```
 
-Dependencies `curl`, `igraph`, `nlohmann-json`, `utf8proc` are declared in `vcpkg.json` and built on first configure. On Linux, install a Fortran compiler first (`sudo apt-get install -y gfortran`) — igraph's `lapack-reference` needs one.
-
 ### 3. Configure, build, verify
 
 ```sh
 cmake --preset default
-cmake --build --preset default
-ctest --preset default
+cmake --build --preset default            # first build compiles vcpkg deps — several minutes
+ctest --preset default                    # smoke suite
 build/default/src/cli/cgraph --root . --out cgraph-out
 ```
 
@@ -164,6 +186,8 @@ for b in cli/cgraph daemon/graphd client/cgraph-client mcp/cgraph-mcp; do
 done
 ```
 
+> MCP client configs (below) should still use absolute paths to the binaries, since a client may not inherit your interactive shell's `PATH`.
+
 ### Development builds
 
 ```sh
@@ -171,11 +195,177 @@ cmake --preset sanitizers && cmake --build --preset sanitizers && ctest --preset
 cmake --preset fuzzers    && cmake --build --preset fuzzers    && ctest --preset fuzzers      # libFuzzer
 ```
 
-</details>
+The fuzzer preset requires a Clang toolchain with the libFuzzer runtime; use an upstream LLVM/Clang toolchain if Apple Command Line Tools lack it.
+
+## Use with coding agents
+
+`cgraph-mcp` is a standard [MCP](https://modelcontextprotocol.io) server over stdio (protocol `2024-11-05`). Register it once and your agent navigates the codebase through fast graph queries instead of blind grep/read:
+
+| Tool | Purpose |
+| --- | --- |
+| `graph_query` | Search nodes by text; ranked by centrality |
+| `graph_explain` | A node's neighborhood (callers, callees, imports) |
+| `graph_impact` | Transitive blast radius of changing a node |
+| `graph_path` | Shortest path between two nodes |
+| `graph_context` | Token-budgeted source bundle for a node/query (with adaptive gather) |
+| `graph_update` | Content-verified sync; returns a `content_root` to pin reads |
+| `graph_status` | Daemon, graph, and enrichment status |
+| `graph_remember` / `graph_recall` | Session memory — checkpoint before `/compact`, recall after |
+| `graph_shutdown` | Stop the daemon |
+
+`graph_context` has two gather modes. The default (`gather: "fixed"`) packs the whole k-hop neighborhood. With a task query in hand, `gather: "adaptive"` keeps the full 2-hop core but expands the third hop only along query-relevant nodes — on the retrieval eval it lifted grade-2 recall **+0.057** for **+13%** candidate tokens, versus the **+96%** a full 3-hop gather costs (needs a `query`/`q`).
+
+The server resolves the project root from `--root`, then `CLAUDE_PROJECT_DIR`, then the working directory, and finds `graphd` on its own (explicit `--daemon` wins, then `CGRAPH_DAEMON_PATH`, then a `graphd` next to `cgraph-mcp`). The first call triggers a one-time build (seconds); while it runs, results carry `"graph_state": "building"` so an empty result is never mistaken for "no match". Subsequent queries are warm (~10 ms). In the examples below, replace `/abs/path/to/CGraph` with this repo's absolute path.
+
+### Claude Code
+
+Claude Code sets `CLAUDE_PROJECT_DIR` per session, so a single registration works across every project:
+
+```sh
+claude mcp add --scope user --transport stdio cgraph \
+  -- /abs/path/to/CGraph/build/default/src/mcp/cgraph-mcp \
+     --daemon /abs/path/to/CGraph/build/default/src/daemon/graphd
+```
+
+Or commit a project-scoped `.mcp.json` at the repo root to share it with collaborators:
+
+```json
+{
+  "mcpServers": {
+    "cgraph": {
+      "command": "/abs/path/to/CGraph/build/default/src/mcp/cgraph-mcp",
+      "args": ["--daemon", "/abs/path/to/CGraph/build/default/src/daemon/graphd"]
+    }
+  }
+}
+```
+
+Verify with `/mcp` inside Claude Code. This repo also ships host skills under `integrations/skills/` — `cgraph` (reach for the graph first on structure questions) and `cgraph-enrich` (the semantic-enrichment loop). Install with `cgraph skills install`; add the scheduled enrichment drainer (status-gated) with `cgraph drain install`.
+
+### Codex CLI
+
+Codex does not set `CLAUDE_PROJECT_DIR`, so the server falls back to the working directory Codex launches it from:
+
+```sh
+codex mcp add cgraph \
+  -- /abs/path/to/CGraph/build/default/src/mcp/cgraph-mcp \
+     --daemon /abs/path/to/CGraph/build/default/src/daemon/graphd
+```
+
+…or edit `~/.codex/config.toml` directly (add `"--root", "/abs/path/to/your/project"` to `args` to pin a project regardless of working directory):
+
+```toml
+[mcp_servers.cgraph]
+command = "/abs/path/to/CGraph/build/default/src/mcp/cgraph-mcp"
+args = ["--daemon", "/abs/path/to/CGraph/build/default/src/daemon/graphd"]
+```
+
+Restart Codex and run `/mcp` in the TUI to confirm.
+
+### Cursor, Windsurf, and other MCP clients
+
+Any MCP client that launches a stdio command works — add a server entry with the command and args (most use a `mcpServers` JSON block like Claude Code's `.mcp.json`). Set `--root` explicitly for clients that don't set `CLAUDE_PROJECT_DIR`. Smoke-test the server by hand:
+
+```sh
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  | build/default/src/mcp/cgraph-mcp --root . \
+      --daemon build/default/src/daemon/graphd
+```
+
+## CLI
+
+```sh
+cgraph [--root PATH] [--out PATH]
+cgraph enrich-plan [--root PATH] [--out PATH] [--drop DIR]
+cgraph enrich-ingest [--root PATH] [--out PATH] [--drop DIR]
+```
+
+Defaults: `--root .`, `--out cgraph-out`, `--drop` → CGraph's semantic drop directory under the output path.
+
+```sh
+# Build deterministic exports.
+build/default/src/cli/cgraph --root /path/to/project --out /tmp/cgraph-out
+# Create a semantic chunk plan for host enrichment.
+build/default/src/cli/cgraph enrich-plan --root /path/to/project --out /tmp/cgraph-out
+# Ingest host-written chunk_NN.json fragments and re-export the graph.
+build/default/src/cli/cgraph enrich-ingest --root /path/to/project --out /tmp/cgraph-out
+```
+
+## Daemon & thin client
+
+```sh
+build/default/src/daemon/graphd --root /path/to/project
+```
+
+The daemon watches the project tree while it runs: source edits fold into the graph incrementally within a couple of seconds (a large batch, e.g. a branch switch, collapses into one full rescan), and incremental state re-persists to `cgraph-out/` in the background and on shutdown. `--no-watch` disables this.
+
+Optional daemon flags:
+
+```sh
+graphd --root PATH --idle-timeout SECONDS --no-watch
+graphd --benchmark-query --graph PATH --query TEXT
+graphd --version
+```
+
+Use the thin client (responses are JSON; `status` includes process metadata, node/edge counts, cache hit rate, and enrichment state):
+
+```sh
+build/default/src/client/cgraph-client --root /path/to/project status
+build/default/src/client/cgraph-client --root /path/to/project query '{"q":"Parser"}'
+build/default/src/client/cgraph-client --root /path/to/project explain '{"id":"Parser"}'
+build/default/src/client/cgraph-client --root /path/to/project path '{"source":"A","target":"B"}'
+build/default/src/client/cgraph-client --root /path/to/project update '{"path":"."}'
+build/default/src/client/cgraph-client --root /path/to/project shutdown
+```
+
+## MCP server
+
+`cgraph-mcp` speaks MCP over stdio: newline-delimited JSON-RPC 2.0 implementing `initialize`, `tools/list`, `tools/call`, and `notifications/initialized` (protocol `2024-11-05`). Tool calls route through the same daemon operation handler used by the thin client; invalid JSON receives a JSON-RPC parse error. For registration and the tool list, see [Use with coding agents](#use-with-coding-agents).
+
+## Host integrations
+
+CGraph keeps provider and model concerns outside the native binary. Host integrations use `cgraph-client` for graph operations and dispatch semantic work through their own agent/model workflow. The reference hook accepts the deterministic daemon operations:
+
+```sh
+integrations/hooks/cgraph-hook.sh status
+integrations/hooks/cgraph-hook.sh query '{"q":"GraphSnapshot"}'
+```
+
+Useful environment variables: `CGRAPH_CLIENT` (client executable), `CGRAPH_PROJECT_ROOT` (project root), `CGRAPH_DAEMON` (daemon path), `CGRAPH_INTERVAL_SECONDS` (always-on interval, default `30`), `CGRAPH_REFRESH_ON_START` (`0` to skip the initial update), `CGRAPH_ONCE` (`1` to run one status check and exit). Run the always-on reference loop:
+
+```sh
+CGRAPH_CLIENT=build/default/src/client/cgraph-client \
+CGRAPH_PROJECT_ROOT=/path/to/project \
+integrations/always-on/cgraph-always-on.sh
+```
+
+See `docs/host-skill-contract.md` for the full host contract.
+
+## Semantic enrichment
+
+A host-driven workflow: (1) CGraph emits a chunk plan for uncached or stale semantic inputs; (2) the host processes each chunk with its own model/agent; (3) the host writes exactly one `chunk_NN.json` fragment per completed chunk into the semantic drop directory; (4) CGraph validates each fragment before graph mutation; (5) valid fragments update the graph and semantic cache, malformed fragments are rejected without changing the snapshot.
+
+Fragments use this node-link shape (required: node `id`/`label`; edge `source`/`target`/`relation`; hyperedge `id`/`nodes`/`relation`. Optional: `source_file`, `source_location`, `type`/`kind`, `confidence`, `confidence_score`, `properties`, `warnings`):
+
+```json
+{
+  "nodes": [{ "id": "doc:architecture", "label": "Architecture", "kind": "document" }],
+  "edges": [{ "source": "doc:architecture", "target": "component:engine", "relation": "describes" }],
+  "hyperedges": []
+}
+```
+
+## Development notes
+
+- Keep extraction behavior deterministic in the engine. Provider-specific logic belongs in host integrations.
+- Add smoke coverage under `tests/smoke/` for engine behavior and integration surfaces.
+- Add fuzzer coverage under `tests/fuzz/` for parser or extractor hardening.
+- Prefer extending the central language configuration and extractor pipeline over adding ad-hoc extraction logic in consumers.
+- The interactive viewer is intentionally **dependency-free** — no JS libraries in the emitted HTML.
 
 ## Contributing
 
-Issues and PRs welcome. Build with the `default` preset, keep `ctest --preset default` green, and prefer the `sanitizers` preset while iterating. The interactive viewer is intentionally **dependency-free** — no JS libraries in the emitted HTML.
+Issues and PRs welcome. Build with the `default` preset, keep `ctest --preset default` green, and prefer the `sanitizers` preset while iterating.
 
 ## License
 
